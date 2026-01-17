@@ -6,7 +6,6 @@ Catchup 插件 - 关键词触发回复
 import contextlib
 import json
 import random
-import re
 import time
 from pathlib import Path
 from typing import Optional, Dict, List
@@ -21,7 +20,6 @@ from pagermaid.utils import logs
 plugin_dir = Path(__file__).parent
 config_file = plugin_dir / "catchup_config.json"
 trigger_log_file = plugin_dir / "catchup_trigger_log.json"
-data_file = plugin_dir / "catchup_data.json"
 
 # 默认频率限制（秒）
 DEFAULT_RATE_LIMIT = 3600
