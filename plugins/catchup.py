@@ -236,6 +236,7 @@ class TriggerLogManager:
 # 全局实例
 config_manager = CatchupConfigManager()
 trigger_log = TriggerLogManager()
+template_generator = TemplateGenerator()
 
 
 @listener(
@@ -415,3 +416,79 @@ async def show_status(message: Message):
 
 **触发方式:** `/关键词`"""
     await message.edit(status_text)
+
+
+async def get_target_user_last_message(client: Client, chat_id: int, user_id: int, limit: int = 100):
+    """获取指定用户在群组中的最近一条消息"""
+    try:
+        async for msg in client.get_chat_history(chat_id, limit=limit):
+            if msg.from_user and msg.from_user.id == user_id:
+                return msg
+        return None
+    except Exception as e:
+        logs.error(f"获取用户消息失败: {e}")
+        return None
+
+
+@listener(is_plugin=True, incoming=True, outgoing=False, ignore_edited=True)
+async def trigger_catchup(message: Message, bot: Client):
+    """触发 catchup 回复"""
+    text = message.text or ""
+    if not text.startswith('/'):
+        return
+
+    # 检查功能是否开启
+    if not config_manager.enabled:
+        return
+
+    # 提取关键词（去掉开头的 /）
+    keyword = text[1:].strip()
+    if not keyword:
+        return
+
+    # 检查关键词配置是否存在
+    keyword_config = config_manager.get_keyword_config(keyword)
+    if not keyword_config:
+        return
+
+    # 检查是否在目标群组
+    if message.chat.id != keyword_config["target_chat_id"]:
+        return
+
+    # 获取触发用户ID
+    trigger_user_id = message.from_user.id if message.from_user else None
+    if not trigger_user_id:
+        return
+
+    # 检查是否是主人
+    is_owner = (trigger_user_id == config_manager.owner_id) if config_manager.owner_id else False
+
+    # 检查频率限制
+    can_trigger, wait_time = trigger_log.can_trigger(keyword, is_owner)
+    if not can_trigger:
+        logs.info(f"关键词 `{keyword}` 触发过于频繁，需等待 {wait_time} 秒")
+        return
+
+    # 获取触发用户信息
+    trigger_user = message.from_user
+    trigger_name = trigger_user.username or trigger_user.first_name or str(trigger_user.id)
+
+    # 生成回复内容
+    with contextlib.suppress(Exception):
+        # 获取目标用户的最近发言
+        target_message = await get_target_user_last_message(bot, message.chat.id, keyword_config["target_user_id"])
+
+        if target_message and target_message.from_user:
+            target_name = target_message.from_user.username or target_message.from_user.first_name or str(target_message.from_user.id)
+            reply_text = template_generator.generate_dual(trigger_name, target_name)
+            await target_message.reply(reply_text)
+            logs.info(f"关键词 `{keyword}` 已触发，回复用户 {keyword_config['target_user_id']}")
+
+            # 记录触发时间
+            trigger_log.record_trigger(keyword)
+
+            # 删除触发的命令消息
+            with contextlib.suppress(Exception):
+                await message.delete()
+        else:
+            logs.info(f"未找到用户 {keyword_config['target_user_id']} 的最近发言")
