@@ -1,13 +1,14 @@
-# Catchup 插件
+# JPM 插件
 
 ## 版本历史
 
+- **v1.2** - 更新模板内容，使用 sao_nkr 最新发癫文案（单人21条 + 双人20条）
 - **v1.1** - 使用 sao_nkr 发癫文案替换模板（单人16条 + 双人15条）
 - **v1.0** - 初始版本，多关键词支持、独立频率限制
 
 ## 功能介绍
 
-Catchup 是一个基于 PagerMaid-Pyro 的关键词触发回复插件，支持多关键词配置、独立频率限制和灵活的目标回复。
+JPM 是一个基于 PagerMaid-Pyro 的关键词触发回复插件，支持多关键词配置、独立频率限制和灵活的目标回复。
 
 **模板来源：** 使用 sao_nkr 插件的发癫风格文案，包含单人独白和双人互动两种模式。
 
@@ -25,49 +26,54 @@ Catchup 是一个基于 PagerMaid-Pyro 的关键词触发回复插件，支持�
 
 1. **设置关键词配置**：
    ```
-   ,catchup set <关键词> <用户ID> <群组ID> [秒数]
+   ,jpm set <关键词> <用户ID> <群组ID> [秒数]
    ```
 
 2. **设置主人ID**（可选）：
    ```
-   ,catchup owner <你的Telegram用户ID>
+   ,jpm owner <你的Telegram用户ID>
    ```
 
 3. **开启功能**：
    ```
-   ,catchup on
+   ,jpm on
    ```
 
 4. **查看状态**：
    ```
-   ,catchup status
+   ,jpm status
    ```
 
 ### 触发方式
 
-在群组中发送 `/关键词`，例如：
-- `/hello` - 触发 hello 关键词配置
-- `/hi` - 触发 hi 关键词配置
+在群组中发送 `/关键词`，支持两种模式：
+
+**单人模式** - 直接发送关键词：
+- `/hello` - 触发单人回复模板
+
+**双人模式** - 回复某人 或 带参数：
+- `/hello` + 回复某人 → 触发双人互动模板
+- `/hello 张三` → 触发双人互动模板（参数作为第二个人名）
 
 ### 管理命令
 
 | 命令 | 说明 |
 |------|------|
-| `,catchup on` | 开启全局功能 |
-| `,catchup off` | 关闭全局功能 |
-| `,catchup set <关键词> <用户ID> <群组ID> [秒数]` | 添加/更新关键词配置 |
-| `,catchup delete <关键词>` | 删除关键词配置 |
-| `,catchup list` | 列出所有关键词配置 |
-| `,catchup owner <用户ID>` | 设置主人ID |
-| `,catchup status` | 查看当前状态 |
+| `,jpm on` | 开启全局功能 |
+| `,jpm off` | 关闭全局功能 |
+| `,jpm set <关键词> <用户ID> <群组ID> [秒数]` | 添加/更新关键词配置 |
+| `,jpm delete <关键词>` | 删除关键词配置 |
+| `,jpm list` | 列出所有关键词配置 |
+| `,jpm owner <用户ID>` | 设置主人ID |
+| `,jpm status` | 查看当前状态 |
 
 ## 文件结构
 
 ```
 plugins/
-├── catchup.py                   # 插件主文件
-├── catchup_config.json          # 配置文件（自动生成）
-└── catchup_trigger_log.json     # 触发记录（自动生成）
+├── jpm.py                   # 插件主文件
+├── jpm_config.json          # 配置文件（自动生成）
+└── jpm_trigger_log.json     # 触发记录（自动生成）
 ```
 
 ## 技术实现
@@ -81,7 +87,7 @@ plugins/
 
 ### 数据结构
 
-#### catchup_config.json
+#### jpm_config.json
 ```json
 {
   "enabled": true,
