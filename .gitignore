@@ -1,0 +1,10 @@
+# Claude Code
+.claude/
+
+# Plugin config files (may contain sensitive data)
+*_config.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
