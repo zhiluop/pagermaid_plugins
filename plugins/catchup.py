@@ -88,3 +88,77 @@ class TemplateGenerator:
             return f"{trigger_user} 向 {target_user} 发送了消息"
         template = random.choice(self.dual_templates)
         return template.replace("{trigger_user}", trigger_user).replace("{target_user}", target_user)
+
+
+class CatchupConfigManager:
+    """配置管理类"""
+
+    def __init__(self):
+        self.enabled: bool = False
+        self.owner_id: Optional[int] = None
+        self.keywords: Dict[str, Dict] = {}  # keyword -> {target_user_id, target_chat_id, rate_limit_seconds}
+        self.load()
+
+    def load(self):
+        """从文件加载配置"""
+        if config_file.exists():
+            try:
+                with open(config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.enabled = data.get("enabled", False)
+                    self.owner_id = data.get("owner_id")
+                    self.keywords = data.get("keywords", {})
+                logs.info(f"Catchup 配置已加载，共 {len(self.keywords)} 个关键词")
+            except Exception as e:
+                logs.error(f"加载 Catchup 配置失败: {e}")
+                self.keywords = {}
+        else:
+            self.keywords = {}
+
+    def save(self):
+        """保存配置到文件"""
+        try:
+            with open(config_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "enabled": self.enabled,
+                    "owner_id": self.owner_id,
+                    "keywords": self.keywords,
+                }, f, indent=4, ensure_ascii=False)
+            logs.info("Catchup 配置已保存")
+        except Exception as e:
+            logs.error(f"保存 Catchup 配置失败: {e}")
+
+    def add_keyword(self, keyword: str, target_user_id: int, target_chat_id: int, rate_limit: int = DEFAULT_RATE_LIMIT):
+        """添加或更新关键词配置"""
+        self.keywords[keyword] = {
+            "target_user_id": target_user_id,
+            "target_chat_id": target_chat_id,
+            "rate_limit_seconds": rate_limit
+        }
+        self.save()
+        return f"关键词 `{keyword}` 配置已更新"
+
+    def delete_keyword(self, keyword: str) -> tuple[bool, str]:
+        """删除关键词配置"""
+        if keyword in self.keywords:
+            del self.keywords[keyword]
+            self.save()
+            return True, f"关键词 `{keyword}` 已删除"
+        return False, f"关键词 `{keyword}` 不存在"
+
+    def get_keyword_config(self, keyword: str) -> Optional[Dict]:
+        """获取关键词配置"""
+        return self.keywords.get(keyword)
+
+    def list_keywords(self) -> str:
+        """列出所有关键词配置"""
+        if not self.keywords:
+            return "暂无关键词配置"
+        lines = ["**关键词配置列表：**"]
+        for keyword, config in self.keywords.items():
+            lines.append(f"- `{keyword}` → 用户: `{config['target_user_id']}`, 群组: `{config['target_chat_id']}`, 限制: {config['rate_limit_seconds']}秒")
+        return "\n".join(lines)
+
+
+# 全局实例
+config_manager = CatchupConfigManager()
