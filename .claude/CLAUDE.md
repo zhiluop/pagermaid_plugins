@@ -135,10 +135,15 @@ tegbot_plugin/
 3. **提交前检查清单**：
    ```bash
    # 检查是否包含敏感信息
-   git diff --cached | grep -E "(password|token|key|secret|api_key|cookie|session|185\.|192\.168|10\.)"
+   git diff --cached | grep -E "(password|token|key|secret|api_key|cookie|session)"
    ```
 
-4. **违反处理**：
+4. **强制要求**：
+   - **每次 git commit 前必须执行隐私检查**
+   - **每次 git push 前必须再次确认无敏感信息**
+   - 使用 `.gitignore` 排除所有包含敏感信息的文件
+
+5. **违反处理**：
    - 如发现敏感信息已提交，立即用新提交覆盖
    - 不要尝试删除历史记录（会造成更大问题）
    - 考虑更新已泄露的凭证/密钥
@@ -149,7 +154,7 @@ tegbot_plugin/
 ```json
 {
   "host": "192.168.1.100",
-  "username": "root",
+  "username": "admin",
   "password": "mySecretPassword123"
 }
 ```
