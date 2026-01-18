@@ -30,7 +30,7 @@ cp .vps/config.example.json .vps_config.json
 ```json
 {
   "host": "your-vps-ip.com",
-  "username": "root",
+  "username": "your_username",
   "password": "your_password",
   "plugin_dir": "/home/workdir/plugins",
   "description": "PagerMaid-Pyro VPS 插件部署目标"
