@@ -1,0 +1,7 @@
+{
+  "host": "你的VPS IP地址",
+  "username": "ssh用户名",
+  "password": "ssh密码",
+  "plugin_dir": "/home/workdir/plugins",
+  "description": "PagerMaid-Pyro VPS 插件部署目标"
+}

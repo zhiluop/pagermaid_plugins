@@ -11,4 +11,5 @@ __pycache__/
 
 # VPS deployment config (contains sensitive credentials)
 .vps_config.json
-.vps/
+!.vps/deploy.py
+!.vps/config.example.json
