@@ -125,7 +125,7 @@ class JPMConfigManager:
     def __init__(self):
         self.enabled: bool = False  # 插件总开关，控制所有关键词是否生效
         self.owner_id: Optional[int] = None  # 插件所有者ID，只有所有者可以管理配置
-        self.keywords: Dict[str, Dict] = {}  # keyword -> {target_user_id, target_chat_id, rate_limit_seconds}
+        self.keywords: Dict[str, Dict] = {}  # keyword -> {target_user_id, target_chat_id, rate_limit_seconds, anchor_message_id}
         self.load()
 
     def load(self) -> None:
@@ -163,20 +163,51 @@ class JPMConfigManager:
             return False
 
     def add_keyword(self, keyword: str, target_user_id: int, target_chat_id: int, rate_limit: int = DEFAULT_RATE_LIMIT) -> str:
-        """添加或更新关键词配置"""
+        """添加或更新关键词配置（保留已有的锚点消息ID）"""
         # 参数验证
         if not keyword or not keyword.strip():
             return "关键词不能为空"
         if rate_limit < 0:
             return "频率限制必须大于等于0"
 
+        # 保留已有的锚点消息ID
+        existing_anchor = None
+        if keyword in self.keywords:
+            existing_anchor = self.keywords[keyword].get("anchor_message_id")
+
         self.keywords[keyword] = {
             "target_user_id": target_user_id,
             "target_chat_id": target_chat_id,
-            "rate_limit_seconds": rate_limit
+            "rate_limit_seconds": rate_limit,
+            "anchor_message_id": existing_anchor
         }
         self.save()
         return f"关键词 `{keyword}` 配置已更新"
+
+    def set_anchor(self, keyword: str, anchor_message_id: int) -> str:
+        """设置关键词的锚点消息ID"""
+        if keyword not in self.keywords:
+            return f"关键词 `{keyword}` 不存在"
+
+        self.keywords[keyword]["anchor_message_id"] = anchor_message_id
+        self.save()
+        return f"关键词 `{keyword}` 的锚点消息已设置"
+
+    def get_anchor(self, keyword: str) -> Optional[int]:
+        """获取关键词的锚点消息ID"""
+        config = self.keywords.get(keyword)
+        return config.get("anchor_message_id") if config else None
+
+    def clear_anchor(self, keyword: str) -> str:
+        """清除关键词的锚点消息ID"""
+        if keyword not in self.keywords:
+            return f"关键词 `{keyword}` 不存在"
+
+        if "anchor_message_id" in self.keywords[keyword]:
+            del self.keywords[keyword]["anchor_message_id"]
+            self.save()
+            return f"关键词 `{keyword}` 的锚点消息已清除"
+        return f"关键词 `{keyword}` 没有设置锚点消息"
 
     def delete_keyword(self, keyword: str) -> tuple[bool, str]:
         """删除关键词配置"""
@@ -271,7 +302,7 @@ template_generator = TemplateGenerator()
 @listener(
     command="jpm",
     description="JPM 插件管理",
-    parameters="<on|off|set|delete|list|owner|status>",
+    parameters="<on|off|set|delete|list|owner|status|anchor>",
     is_plugin=True,
 )
 async def jpm_command(message: Message):
@@ -296,6 +327,8 @@ async def jpm_command(message: Message):
         await set_owner(message)
     elif cmd == "status":
         await show_status(message)
+    elif cmd == "anchor":
+        await manage_anchor(message)
     else:
         await show_help(message)
 
@@ -324,9 +357,16 @@ async def show_help(message: Message):
 **,jpm list** - 列出所有关键词配置
 **,jpm owner <用户ID>** - 设置主人ID
 **,jpm status** - 查看当前状态
+**,jpm anchor <set|clear> <关键词> [消息ID]** - 管理锚点消息
 
 **触发方式:**
 - 在群组中发送 `/关键词` 触发对应配置的回复
+
+**锚点说明:**
+- 插件会自动记录目标用户的最新发言作为锚点
+- 即使目标用户长时间未发言，也能通过锚点消息进行回复
+- 手动设置：回复一条消息后使用 `,jpm anchor set <关键词>`
+- 清除锚点：`,jpm anchor clear <关键词>`
 
 **频率限制:**
 - 主人触发：无限制
@@ -447,6 +487,53 @@ async def show_status(message: Message):
     await message.edit(status_text)
 
 
+async def manage_anchor(message: Message):
+    """管理锚点消息"""
+    if not check_permission(message):
+        await message.edit("❌ 权限不足！只有主人可以执行此操作")
+        return
+
+    params = message.arguments.split()
+    if len(params) < 2:
+        await message.edit("❌ 参数错误！\n使用 `,jpm anchor <set|clear> <关键词> [消息ID]`")
+        return
+
+    action = params[1].lower()
+    keyword = params[2] if len(params) > 2 else None
+
+    if not keyword:
+        await message.edit("❌ 请指定关键词")
+        return
+
+    if action == "set":
+        # 设置锚点：优先使用回复的消息ID，其次是参数中的ID
+        message_id = None
+
+        # 如果回复了消息，使用被回复消息的ID
+        if message.reply_to_message:
+            message_id = message.reply_to_message.id
+        # 否则使用参数中的消息ID
+        elif len(params) > 3:
+            try:
+                message_id = int(params[3])
+            except ValueError:
+                await message.edit("❌ 消息ID格式错误！请输入有效的数字ID")
+                return
+        else:
+            await message.edit("❌ 请回复一条消息或指定消息ID\n使用方法：回复一条消息后发送 `,jpm anchor set <关键词>`")
+            return
+
+        result = config_manager.set_anchor(keyword, message_id)
+        await message.edit(f"✅ {result}\n锚点消息ID: `{message_id}`")
+
+    elif action == "clear":
+        # 清除锚点
+        result = config_manager.clear_anchor(keyword)
+        await message.edit(f"{'✅' if '已清除' in result else '❌'} {result}")
+    else:
+        await message.edit("❌ 未知操作！使用 `set` 或 `clear`")
+
+
 async def get_target_user_last_message(client: Client, chat_id: int, user_id: int, limit: int = 100):
     """获取指定用户在群组中的最近一条消息"""
     try:
@@ -457,6 +544,32 @@ async def get_target_user_last_message(client: Client, chat_id: int, user_id: in
     except Exception as e:
         logs.error(f"获取用户消息失败: {e}")
         return None
+
+
+@listener(is_plugin=True, incoming=True, outgoing=False, ignore_edited=True)
+async def track_anchor_messages(message: Message, bot: Client):
+    """自动记录目标用户的发言作为锚点消息"""
+    # 只处理群组消息
+    if not message.chat or message.chat.id >= 0:
+        return
+
+    # 获取发送者ID
+    if not message.from_user:
+        return
+
+    sender_id = message.from_user.id
+    chat_id = message.chat.id
+    message_id = message.id
+
+    # 检查是否有任何关键词配置了这个用户作为目标
+    for keyword, config in config_manager.keywords.items():
+        if (config["target_user_id"] == sender_id and
+            config["target_chat_id"] == chat_id):
+            # 更新锚点消息ID
+            config["anchor_message_id"] = message_id
+            config_manager.save()
+            logs.debug(f"[JPM] 更新关键词 `{keyword}` 的锚点消息: {message_id}")
+            break  # 一个用户只处理一次
 
 
 @listener(is_plugin=True, incoming=True, outgoing=True, ignore_edited=True)
@@ -514,8 +627,20 @@ async def trigger_jpm(message: Message, bot: Client):
 
     # 生成回复内容
     with contextlib.suppress(Exception):
-        # 获取目标用户的最近发言
-        target_message = await get_target_user_last_message(bot, message.chat.id, keyword_config["target_user_id"])
+        target_message = None
+        anchor_message_id = keyword_config.get("anchor_message_id")
+
+        # 优先使用锚点消息
+        if anchor_message_id:
+            try:
+                target_message = await bot.get_messages(message.chat.id, anchor_message_id)
+                logs.debug(f"[JPM] 使用锚点消息: {anchor_message_id}")
+            except Exception as e:
+                logs.warning(f"[JPM] 获取锚点消息 {anchor_message_id} 失败: {e}，尝试查找最近发言")
+
+        # 如果没有锚点消息，则查找最近发言
+        if not target_message:
+            target_message = await get_target_user_last_message(bot, message.chat.id, keyword_config["target_user_id"])
 
         if target_message and target_message.from_user:
             target_name = target_message.from_user.username or target_message.from_user.first_name or str(target_message.from_user.id)
@@ -556,4 +681,4 @@ async def trigger_jpm(message: Message, bot: Client):
             with contextlib.suppress(Exception):
                 await message.delete()
         else:
-            logs.warning(f"[JPM] 未找到目标用户 {keyword_config['target_user_id']} 的最近发言")
+            logs.warning(f"[JPM] 未找到目标用户 {keyword_config['target_user_id']} 的回复目标")

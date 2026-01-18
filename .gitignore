@@ -8,3 +8,7 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# VPS deployment config (contains sensitive credentials)
+.vps_config.json
+.vps/
