@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VPS 部署脚本 - 上传插件到 PagerMaid-Pyro VPS
+VPS 插件部署脚本 - 将本地插件快速上传到 PagerMaid-Pyro VPS
+
+前提条件:
+    - VPS 上已部署 PagerMaid-Pyro 并完成持久化配置
+    - 确保 VPS 的 plugins 目录存在且可写
+    - 已安装 paramiko 依赖库
 
 使用方法:
     python .vps/deploy.py              # 上传所有插件
     python .vps/deploy.py jpm          # 上传指定插件
 
 配置说明:
-    复制 .vps/config.example.json 为 .vps_config.json 并填写你的 VPS 信息
+    1. 复制配置模板: cp .vps/config.example.json .vps_config.json
+    2. 编辑 .vps_config.json 填写你的 VPS 连接信息
+    3. 运行部署脚本上传插件
+
+部署后操作:
+    上传完成后，在 Telegram 中发送 /reload 重载插件
 """
 import json
 import os

@@ -13,3 +13,4 @@ __pycache__/
 .vps_config.json
 !.vps/deploy.py
 !.vps/config.example.json
+!.vps/README.md
