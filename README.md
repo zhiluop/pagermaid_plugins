@@ -12,6 +12,7 @@
 |------|------|------|
 | CAI | 自动点踩插件 - 自动对目标用户的发言进行点踩 | [docs/cai.md](docs/cai.md) |
 | JPM | 关键词触发回复插件 - 支持多关键词、频率限制、锚点消息系统 | [docs/jpm.md](docs/jpm.md) |
+| SharePlugins | 分享插件 - 将插件以文件形式分享，支持列表查看和序号选择 | [docs/share_plugins.md](docs/share_plugins.md) |
 
 ## 安装
 
