@@ -18,3 +18,15 @@ __pycache__/
 # Temporary files
 nul
 *.exe
+
+# VPS upload directory (not needed in git)
+.vps_uploaded/
+
+# Documentation (local use only)
+docs/
+
+# Old plugins directory (migrated to new structure)
+plugins/
+
+# VPS uploaded plugins directory (not needed in git)
+.vps_uploaded/

@@ -1,0 +1,44 @@
+{
+    "list": [
+        {
+            "name": "cai",
+            "version": "1.0.0",
+            "section": "chat",
+            "maintainer": "Vibe Coding",
+            "size": "14.494 kb",
+            "supported": true,
+            "des_short": "自动点踩插件，支持多目标配置、冷却时间限制、标准表情和自定义表情",
+            "des": "自动点踩插件，支持多目标配置、冷却时间限制、标准表情和自定义表情"
+        },
+        {
+            "name": "get_reactions",
+            "version": "1.0.0",
+            "section": "chat",
+            "maintainer": "Vibe Coding",
+            "size": "4.769 kb",
+            "supported": true,
+            "des_short": "表情获取辅助命令，用于测试环境是否支持自定义表情反应",
+            "des": "表情获取辅助命令，用于测试环境是否支持自定义表情反应"
+        },
+        {
+            "name": "jpm",
+            "version": "1.0.0",
+            "section": "chat",
+            "maintainer": "Vibe Coding",
+            "size": "33.336 kb",
+            "supported": true,
+            "des_short": "关键词触发回复插件，支持多关键词、频率限制、锚点消息系统",
+            "des": "关键词触发回复插件，支持多关键词、频率限制、锚点消息系统"
+        },
+        {
+            "name": "share_plugins",
+            "version": "1.0.0",
+            "section": "chat",
+            "maintainer": "Vibe Coding",
+            "size": "5.106 kb",
+            "supported": true,
+            "des_short": "分享插件，将现有插件以文件形式分享，支持列表查看和序号选择",
+            "des": "分享插件，将现有插件以文件形式分享，支持列表查看和序号选择"
+        }
+    ]
+}
