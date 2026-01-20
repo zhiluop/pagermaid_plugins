@@ -32,25 +32,23 @@ DEFAULT_MODEL = "glm-4.6"
 # 系统提示词 - 仿明清艳情小说风格
 SYSTEM_PROMPT = """你是一位精通明清艳情小说的文学大师，擅长模仿《肉蒲团》《灯草和尚》《金云翘传》《品花鉴宝》《欢喜缘》等经典作品的文风。
 
-你的任务是根据给定的人物名称，创作一段约300字的艳情文案。要求：
+你的任务是根据用户指令创作一段艳情文案。
 
-1. **文风要求**：
-   - 使用半文半白的语言风格，带有古典韵味
-   - 描写要露骨、香艳、撩人，直接描绘肉体之欢、床第之事
-   - 善用比喻、暗示与直白描写相结合，如"云雨"、"巫山"、"销魂"等典故
-   - 细腻描绘身体感受、肌肤触感、呼吸心跳
-   - 注重氛围营造：烛光、帷帐、香气、月色等
+**重要要求：**
+- 只生成一段文案，不要重复，不要生成多个版本
+- 直接输出文案内容，不要有任何前缀、后缀或解释
+- 不要输出"好的"、"以下是"等开场白
 
-2. **内容要求**：
-   - 单人场景：描写主角独处时的情欲涌动、春思难耐、自我抚慰的暗示
-   - 双人场景：描写二人之间的情欲互动、眉目传情、肌肤相亲
-   - 必须包含具体的身体描写和感官体验
-   - 要有情节发展，不是纯粹的堆砌
+**文风要求：**
+- 使用半文半白的语言风格，带有古典韵味
+- 描写要露骨、香艳、撩人，直接描绘肉体之欢、床第之事
+- 善用"云雨"、"巫山"、"销魂"等典故，以及比喻、暗示与直白描写相结合
+- 细腻描绘身体感受、肌肤触感、呼吸心跳
+- 注重氛围营造：烛光、帷帐、香气、月色等
+- 必须包含具体的身体描写和感官体验
+- 要有情节发展，不是纯粹的堆砌
 
-3. **格式要求**：
-   - 直接输出文案内容，不要有任何前缀、后缀或解释
-   - 不要输出"好的"、"以下是"等开场白
-   - 字数控制在280-350字之间
+**字数控制：** 280-350字
 
 请记住：你的目标是创作真正露骨香艳的艳情文学，不是含蓄暗示的普通言情。"""
 
@@ -77,31 +75,21 @@ class AIGenerator:
 
     async def generate_single(self, name: str) -> str:
         """生成单人文案"""
-        user_prompt = f"""请为"{name}"创作一段单人艳情文案。
+        user_prompt = f"""【单人场景】请为"{name}"创作一段艳情文案。
 
-场景：{name}独处闺房/书房，夜深人静，春心萌动，情欲难耐。
+{name}独处闺房/书房，夜深人静，春心萌动，情欲难耐。描写{name}身体的燥热与渴望、辗转难眠的春思、手指不自觉地游走、肌肤的敏感与颤栗、呼吸的急促与轻吟。
 
-要求描写{name}的：
-- 身体的燥热与渴望
-- 辗转难眠的春思
-- 手指不自觉地游走
-- 肌肤的敏感与颤栗
-- 呼吸的急促与轻吟"""
+注意：只生成一段文案，约300字。"""
 
         return await self._call_api(user_prompt)
 
     async def generate_dual(self, name: str, target: str) -> str:
         """生成双人文案"""
-        user_prompt = f"""请为"{name}"和"{target}"创作一段双人艳情文案。
+        user_prompt = f"""【双人场景】请为"{name}"和"{target}"创作一段艳情文案。
 
-场景：{name}与{target}独处，暧昧气氛升温，情欲暗涌。
+{name}与{target}独处，暧昧气氛升温，情欲暗涌。描写两人之间的眉目传情、肌肤触碰时的电流感、呼吸交缠唇齿相接、衣衫渐解春光乍泄、身体纠缠的欢愉。
 
-要求描写：
-- 两人之间的眉目传情
-- 肌肤触碰时的电流感
-- 呼吸交缠、唇齿相接
-- 衣衫渐解、春光乍泄
-- 身体纠缠的欢愉"""
+注意：只生成一段文案，约300字。"""
 
         return await self._call_api(user_prompt)
 
@@ -121,7 +109,7 @@ class AIGenerator:
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.9,
-            "max_tokens": 1000,
+            "max_tokens": 25600,
         }
 
         try:
@@ -133,9 +121,16 @@ class AIGenerator:
 
                 if "choices" in data and len(data["choices"]) > 0:
                     content = data["choices"][0]["message"]["content"]
-                    # 清理可能的前缀
-                    content = content.strip()
-                    return content
+
+                    # 提取真正的文案内容（过滤掉思考过程）
+                    extracted_content = self._extract_content(content)
+
+                    if extracted_content:
+                        return extracted_content
+                    else:
+                        # 如果提取失败，返回原始内容
+                        logs.warning("[JPMAI] 内容提取失败，返回原始内容")
+                        return content.strip()
                 else:
                     logs.error(f"[JPMAI] API 返回无效响应: {data}")
                     return "生成失败，请稍后再试"
@@ -151,6 +146,72 @@ class AIGenerator:
         except Exception as e:
             logs.error(f"[JPMAI] API 调用异常: {e}")
             return f"生成失败: {e}"
+
+    def _extract_content(self, raw_content: str) -> Optional[str]:
+        """从AI回复中提取真正的文案内容"""
+        # 过滤关键词：思考过程通常会包含这些
+        filter_keywords = [
+            "拆解",
+            "构思",
+            "初稿",
+            "步骤",
+            "内心活动",
+            "场景构建",
+            "起草",
+            "润色",
+            "构思",
+            "最终",
+            "修改",
+            "提炼",
+            "首先",
+            "其次",
+            "然后",
+            "最后",
+            "总之",
+            "第一",
+            "第二",
+            "第三",
+            "段落",
+            "标题",
+        ]
+
+        # 按段落分割
+        paragraphs = [p.strip() for p in raw_content.split("\n") if p.strip()]
+
+        if not paragraphs:
+            return None
+
+        # 如果只有一个段落，直接返回
+        if len(paragraphs) == 1:
+            return paragraphs[0]
+
+        # 过滤掉包含思考过程关键词的段落
+        filtered_paragraphs = []
+        for para in paragraphs:
+            # 检查是否包含过滤关键词
+            if any(keyword in para for keyword in filter_keywords):
+                continue
+
+            # 检查是否是标题（较短且包含特殊符号）
+            if len(para) < 30 and (
+                "：" in para or ":" in para or para.endswith("：") or para.endswith(":")
+            ):
+                continue
+
+            filtered_paragraphs.append(para)
+
+        # 如果过滤后没有段落，使用原始段落中最长的
+        if not filtered_paragraphs:
+            filtered_paragraphs = paragraphs
+
+        # 返回最长的段落（通常是正文）
+        longest_para = max(filtered_paragraphs, key=len)
+
+        # 限制字数在280-350字之间
+        if len(longest_para) > 400:
+            longest_para = longest_para[:350] + "..."
+
+        return longest_para
 
 
 class JPMAIConfigManager:
