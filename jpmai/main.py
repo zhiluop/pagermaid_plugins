@@ -94,7 +94,7 @@ class AIGenerator:
         return await self._call_api(user_prompt)
 
     async def _call_api(self, user_prompt: str) -> str:
-        """调用 API 生成文案"""
+        """调用 API 生成文案（带自动重试）"""
         url = f"{self.api_url}/v1/chat/completions"
 
         headers = {
@@ -112,40 +112,62 @@ class AIGenerator:
             "max_tokens": 25600,
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(url, json=payload, headers=headers)
-                response.raise_for_status()
+        # 自动重试机制：最多重试1次
+        max_retries = 1
+        last_error = None
 
-                data = response.json()
+        for attempt in range(max_retries + 1):
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    response = await client.post(url, json=payload, headers=headers)
+                    response.raise_for_status()
 
-                if "choices" in data and len(data["choices"]) > 0:
-                    content = data["choices"][0]["message"]["content"]
+                    data = response.json()
 
-                    # 提取真正的文案内容（过滤掉思考过程）
-                    extracted_content = self._extract_content(content)
+                    if "choices" in data and len(data["choices"]) > 0:
+                        content = data["choices"][0]["message"]["content"]
 
-                    if extracted_content:
-                        return extracted_content
+                        # 提取真正的文案内容（过滤掉思考过程）
+                        extracted_content = self._extract_content(content)
+
+                        if extracted_content:
+                            return extracted_content
+                        else:
+                            # 如果提取失败，返回原始内容
+                            logs.warning("[JPMAI] 内容提取失败，返回原始内容")
+                            return content.strip()
                     else:
-                        # 如果提取失败，返回原始内容
-                        logs.warning("[JPMAI] 内容提取失败，返回原始内容")
-                        return content.strip()
-                else:
-                    logs.error(f"[JPMAI] API 返回无效响应: {data}")
-                    return "生成失败，请稍后再试"
+                        logs.error(f"[JPMAI] API 返回无效响应: {data}")
+                        return "生成失败，请稍后再试"
 
-        except httpx.TimeoutException:
-            logs.error("[JPMAI] API 请求超时")
+            except httpx.TimeoutException as e:
+                last_error = e
+                logs.warning(
+                    f"[JPMAI] API 请求超时 (尝试 {attempt + 1}/{max_retries + 1})"
+                )
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                logs.warning(
+                    f"[JPMAI] API 请求失败: {e.response.status_code} (尝试 {attempt + 1}/{max_retries + 1})"
+                )
+            except Exception as e:
+                last_error = e
+                logs.warning(
+                    f"[JPMAI] API 调用异常: {e} (尝试 {attempt + 1}/{max_retries + 1})"
+                )
+
+        # 所有重试都失败后返回错误信息
+        if isinstance(last_error, httpx.TimeoutException):
+            logs.error("[JPMAI] API 请求超时，已重试1次均失败")
             return "生成超时，请稍后再试"
-        except httpx.HTTPStatusError as e:
+        elif isinstance(last_error, httpx.HTTPStatusError):
             logs.error(
-                f"[JPMAI] API 请求失败: {e.response.status_code} - {e.response.text}"
+                f"[JPMAI] API 请求失败，已重试1次均失败: {last_error.response.status_code}"
             )
-            return f"生成失败: HTTP {e.response.status_code}"
-        except Exception as e:
-            logs.error(f"[JPMAI] API 调用异常: {e}")
-            return f"生成失败: {e}"
+            return f"生成失败: HTTP {last_error.response.status_code}"
+        else:
+            logs.error(f"[JPMAI] API 调用异常，已重试1次均失败: {last_error}")
+            return f"生成失败: {last_error}"
 
     def _extract_content(self, raw_content: str) -> Optional[str]:
         """从AI回复中提取真正的文案内容"""
@@ -287,6 +309,14 @@ class JPMAIConfigManager:
             self.model = model
         self.save()
         return f"API 配置已更新\nURL: `{self.api_url}`\n模型: `{self.model}`"
+
+    def set_model(self, model: str) -> str:
+        """单独设置模型"""
+        if not model or not model.strip():
+            return "模型名不能为空"
+        self.model = model.strip()
+        self.save()
+        return f"模型已更新为: `{self.model}`"
 
     def is_api_configured(self) -> bool:
         """检查 API 是否已配置"""
@@ -443,7 +473,7 @@ trigger_log = TriggerLogManager()
 @listener(
     command="jpmai",
     description="JPMAI 插件管理 - AI 生成艳情文案",
-    parameters="<on|off|set|delete|list|owner|status|anchor|api>",
+    parameters="<on|off|set|delete|list|owner|status|anchor|api|model|test>",
     is_plugin=True,
 )
 async def jpmai_command(message: Message):
@@ -472,6 +502,10 @@ async def jpmai_command(message: Message):
         await manage_anchor(message)
     elif cmd == "api":
         await set_api(message)
+    elif cmd == "model":
+        await set_model(message)
+    elif cmd == "test":
+        await test_connectivity(message)
     else:
         await show_help(message)
 
@@ -490,6 +524,8 @@ async def show_help(message: Message):
 **,jpmai on** - 开启全局功能
 **,jpmai off** - 关闭全局功能
 **,jpmai api <URL> <密钥> [模型]** - 设置 API 配置
+**,jpmai model <模型名>** - 单独切换模型
+**,jpmai test** - 测试 AI 生成的连通性
 **,jpmai set <关键词> <用户ID> <群组ID> [秒数]** - 添加/更新关键词配置
 **,jpmai delete <关键词>** - 删除关键词配置
 **,jpmai list** - 列出所有关键词配置
@@ -500,12 +536,23 @@ async def show_help(message: Message):
 **API 配置示例:**
 `,jpmai api http://example.com:8317 sk-xxxx glm-4.6`
 
+**切换模型示例:**
+`,jpmai model glm-4.6`
+`,jpmai model gpt-4`
+
+**测试功能:**
+- 使用 `,jpmai test` 测试单人/双人文案生成的连通性
+- 测试时会自动生成一段单人文案和双人文案，验证 API 是否正常工作
+
 **触发方式:**
 - 在群组中发送 `/关键词` 触发 AI 生成单人文案
 - 回复某人或带参数 `/关键词 xxx` 触发 AI 生成双人文案
 
 **说明:**
-本插件使用 AI 模型实时生成仿明清艳情小说风格的文案，支持单人和双人场景。"""
+本插件使用 AI 模型实时生成仿明清艳情小说风格的文案，支持单人和双人场景。
+- 内置自动重试机制：API 超时或失败时自动重试1次
+- 支持灵活切换模型：可随时更换不同的 AI 模型
+- 测试功能：验证 AI 生成连通性，确保配置正确"""
     await message.edit(help_text)
 
 
@@ -561,6 +608,24 @@ async def set_api(message: Message):
     model = params[3] if len(params) > 3 else None
 
     msg = config_manager.set_api(api_url, api_key, model)
+    await message.edit(f"✅ {msg}")
+
+
+async def set_model(message: Message):
+    """单独设置模型"""
+    if not check_permission(message):
+        await message.edit("❌ 权限不足！只有主人可以执行此操作")
+        return
+
+    params = message.arguments.split()
+    if len(params) < 2:
+        await message.edit(
+            "❌ 参数错误！\n使用 `,jpmai model <模型名>`\n\n示例：\n`,jpmai model glm-4.6`"
+        )
+        return
+
+    model = params[1]
+    msg = config_manager.set_model(model)
     await message.edit(f"✅ {msg}")
 
 
@@ -705,6 +770,56 @@ async def manage_anchor(message: Message):
         await message.edit(f"{'✅' if '已清除' in result else '❌'} {result}")
     else:
         await message.edit("❌ 未知操作！使用 `set` 或 `clear`")
+
+
+async def test_connectivity(message: Message):
+    """测试 AI 生成的连通性"""
+    # 检查 API 是否配置
+    if not config_manager.is_api_configured():
+        await message.edit("❌ 请先配置 API\n使用 `,jpmai api <URL> <密钥> [模型]`")
+        return
+
+    generator = config_manager.get_generator()
+    if not generator:
+        await message.edit("❌ 获取 AI 生成器失败")
+        return
+
+    # 开始测试
+    await message.edit("⏳ 正在测试 AI 生成的连通性...\n\n正在测试单人模式...")
+    logs.info("[JPMAI] 开始测试单人模式")
+
+    # 测试单人模式
+    try:
+        single_result = await generator.generate_single("测试用户")
+        logs.info(f"[JPMAI] 单人模式测试成功")
+
+        # 测试双人模式
+        await message.edit(
+            "⏳ 正在测试 AI 生成的连通性...\n\n✅ 单人模式测试成功\n\n正在测试双人模式..."
+        )
+        logs.info("[JPMAI] 开始测试双人模式")
+
+        dual_result = await generator.generate_dual("测试用户A", "测试用户B")
+        logs.info(f"[JPMAI] 双人模式测试成功")
+
+        # 显示测试结果
+        test_result = f"""**✅ AI 生成连通性测试成功！**
+
+**单人模式结果：**
+{single_result[:100]}{"..." if len(single_result) > 100 else ""}
+
+**双人模式结果：**
+{dual_result[:100]}{"..." if len(dual_result) > 100 else ""}
+
+---
+
+模型: `{config_manager.model}`
+API地址: `{config_manager.api_url}`"""
+        await message.edit(test_result)
+
+    except Exception as e:
+        logs.error(f"[JPMAI] 连通性测试失败: {e}")
+        await message.edit(f"❌ 连通性测试失败\n错误: {e}")
 
 
 async def get_target_user_last_message(
