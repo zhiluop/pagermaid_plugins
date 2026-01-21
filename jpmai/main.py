@@ -341,16 +341,19 @@ class JPMAIConfigManager:
         if rate_limit < 0:
             return "频率限制必须大于等于0"
 
-        # 保留已有的锚点消息ID
+        # 保留已有的锚点消息ID和开关状态
         existing_anchor = None
+        existing_enabled = True
         if keyword in self.keywords:
             existing_anchor = self.keywords[keyword].get("anchor_message_id")
+            existing_enabled = self.keywords[keyword].get("enabled", True)
 
         self.keywords[keyword] = {
             "target_user_id": target_user_id,
             "target_chat_id": target_chat_id,
             "rate_limit_seconds": rate_limit,
             "anchor_message_id": existing_anchor,
+            "enabled": existing_enabled,
         }
         self.save()
         return f"关键词 `{keyword}` 配置已更新"
@@ -388,6 +391,16 @@ class JPMAIConfigManager:
             return True, f"关键词 `{keyword}` 已删除"
         return False, f"关键词 `{keyword}` 不存在"
 
+    def set_keyword_status(self, keyword: str, enabled: bool) -> tuple[bool, str]:
+        """设置关键词开关状态"""
+        if keyword not in self.keywords:
+            return False, f"关键词 `{keyword}` 不存在"
+
+        self.keywords[keyword]["enabled"] = enabled
+        self.save()
+        status_text = "开启" if enabled else "关闭"
+        return True, f"关键词 `{keyword}` 已{status_text}"
+
     def get_keyword_config(self, keyword: str) -> Optional[Dict]:
         """获取关键词配置"""
         return self.keywords.get(keyword)
@@ -398,8 +411,10 @@ class JPMAIConfigManager:
             return "暂无关键词配置"
         lines = ["**关键词配置列表：**"]
         for keyword, config in self.keywords.items():
+            enabled = config.get("enabled", True)
+            status = "✅" if enabled else "❌"
             lines.append(
-                f"- `{keyword}` → 用户: `{config['target_user_id']}`, 群组: `{config['target_chat_id']}`, 限制: {config['rate_limit_seconds']}秒"
+                f"- {status} `{keyword}` → 用户: `{config['target_user_id']}`, 群组: `{config['target_chat_id']}`, 限制: {config['rate_limit_seconds']}秒"
             )
         return "\n".join(lines)
 
@@ -473,7 +488,7 @@ trigger_log = TriggerLogManager()
 @listener(
     command="jpmai",
     description="JPMAI 插件管理 - AI 生成艳情文案",
-    parameters="<on|off|set|delete|list|owner|status|anchor|api|model|test>",
+    parameters="<on|off|set|delete|list|owner|status|anchor|api|model|test> 或 <关键词> <on|off>",
     is_plugin=True,
 )
 async def jpmai_command(message: Message):
@@ -482,9 +497,16 @@ async def jpmai_command(message: Message):
         await show_help(message)
         return
 
-    cmd = message.arguments.lower().split()[0]
+    params = message.arguments.lower().split()
+    cmd = params[0]
 
-    if cmd == "on":
+    # 处理关键词开关命令: ,jpmai <关键词> on/off
+    if cmd in ["on", "off"] and len(params) >= 3:
+        # 如果是 "on" 或 "off" 但后面还有参数，说明是关键词开关命令
+        keyword = params[1]
+        action = params[2]
+        await toggle_keyword_status(message, keyword, action == "on")
+    elif cmd == "on":
         await enable_feature(message)
     elif cmd == "off":
         await disable_feature(message)
@@ -517,12 +539,27 @@ def check_permission(message: Message) -> bool:
     return message.from_user.id == config_manager.owner_id
 
 
+async def toggle_keyword_status(message: Message, keyword: str, enabled: bool):
+    """切换关键词开关状态"""
+    if not check_permission(message):
+        await message.edit("❌ 权限不足！只有主人可以执行此操作")
+        return
+
+    success, msg = config_manager.set_keyword_status(keyword, enabled)
+    if success:
+        await message.edit(f"✅ {msg}")
+    else:
+        await message.edit(f"❌ {msg}")
+
+
 async def show_help(message: Message):
     """显示帮助信息"""
     help_text = """**JPMAI 插件使用说明:**
 
 **,jpmai on** - 开启全局功能
 **,jpmai off** - 关闭全局功能
+**,jpmai <关键词> on** - 开启指定关键词
+**,jpmai <关键词> off** - 关闭指定关键词
 **,jpmai api <URL> <密钥> [模型]** - 设置 API 配置
 **,jpmai model <模型名>** - 单独切换模型
 **,jpmai test** - 测试 AI 生成的连通性
@@ -540,6 +577,10 @@ async def show_help(message: Message):
 `,jpmai model glm-4.6`
 `,jpmai model gpt-4`
 
+**关键词开关示例:**
+`,jpmai keyword1 on` - 开启关键词 keyword1
+`,jpmai keyword2 off` - 关闭关键词 keyword2
+
 **测试功能:**
 - 使用 `,jpmai test` 测试单人/双人文案生成的连通性
 - 测试时会自动生成一段单人文案和双人文案，验证 API 是否正常工作
@@ -552,6 +593,7 @@ async def show_help(message: Message):
 本插件使用 AI 模型实时生成仿明清艳情小说风格的文案，支持单人和双人场景。
 - 内置自动重试机制：API 超时或失败时自动重试1次
 - 支持灵活切换模型：可随时更换不同的 AI 模型
+- 关键词独立开关：每个关键词可单独开启/关闭
 - 测试功能：验证 AI 生成连通性，确保配置正确"""
     await message.edit(help_text)
 
@@ -892,6 +934,12 @@ async def trigger_jpmai(message: Message, bot: Client):
     # 检查功能是否开启
     if not config_manager.enabled:
         logs.info(f"[JPMAI] 关键词 `/{keyword}` 被触发，但功能未开启")
+        return
+
+    # 检查该关键词是否开启
+    keyword_enabled = keyword_config.get("enabled", True)
+    if not keyword_enabled:
+        logs.info(f"[JPMAI] 关键词 `/{keyword}` 被触发，但该关键词已关闭")
         return
 
     # 检查 API 是否配置
