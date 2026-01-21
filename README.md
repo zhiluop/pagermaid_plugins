@@ -13,8 +13,10 @@
 在 PagerMaid-Pyro 中添加插件源：
 
 ```
-,apt_source add https://raw.githubusercontent.com/zhiluop/tegbot_plugin/main
+,apt_source add https://raw.githubusercontent.com/zhiluop/tegbot_plugin/main/
 ```
+
+> **重要**: URL 末尾必须带 `/`，否则无法正常获取插件列表。
 
 安装插件：
 
@@ -25,6 +27,7 @@
 可用插件：
 - `cai` - 自动点踩插件
 - `jpm` - 关键词触发回复插件
+- `jpmai` - AI 生成艳情文案插件
 - `get_reactions` - 表情获取辅助命令
 - `share_plugins` - 分享插件
 
@@ -41,6 +44,7 @@
 |------|------|
 | CAI | 自动点踩插件 - 自动对目标用户的发言进行点踩 |
 | JPM | 关键词触发回复插件 - 支持多关键词、频率限制、锚点消息系统 |
+| JPMAI | AI 生成艳情文案插件 - 调用 AI 模型实时生成仿明清艳情小说风格的回复 |
 | Get Reactions | 表情获取辅助命令 - 用于测试环境是否支持自定义表情反应 |
 | Share Plugins | 分享插件 - 将插件以文件形式分享，支持列表查看和序号选择 |
 
@@ -52,6 +56,9 @@ tegbot_plugin/
 │   ├── main.py             # 插件主文件
 │   └── DES.md              # 插件描述
 ├── jpm/                     # 关键词触发回复插件
+│   ├── main.py             # 插件主文件
+│   └── DES.md              # 插件描述
+├── jpmai/                   # AI 生成艳情文案插件
 │   ├── main.py             # 插件主文件
 │   └── DES.md              # 插件描述
 ├── get_reactions/           # 表情获取辅助命令
