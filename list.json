@@ -2,7 +2,7 @@
     "list": [
         {
             "name": "cai",
-            "version": "1.0.0",
+            "version": "1.0",
             "section": "chat",
             "maintainer": "Vibe Coding",
             "size": "14.494 kb",
@@ -12,7 +12,7 @@
         },
         {
             "name": "get_reactions",
-            "version": "1.0.0",
+            "version": "1.0",
             "section": "chat",
             "maintainer": "Vibe Coding",
             "size": "4.769 kb",
@@ -22,7 +22,7 @@
         },
         {
             "name": "jpm",
-            "version": "1.0.0",
+            "version": "1.0",
             "section": "chat",
             "maintainer": "Vibe Coding",
             "size": "33.336 kb",
@@ -32,7 +32,7 @@
         },
         {
             "name": "jpmai",
-            "version": "1.0.0",
+            "version": "1.0",
             "section": "chat",
             "maintainer": "Vibe Coding",
             "size": "33.626 kb",
@@ -42,7 +42,7 @@
         },
         {
             "name": "share_plugins",
-            "version": "1.0.0",
+            "version": "1.0",
             "section": "chat",
             "maintainer": "Vibe Coding",
             "size": "5.106 kb",

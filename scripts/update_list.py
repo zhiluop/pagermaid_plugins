@@ -53,11 +53,32 @@ def get_plugin_description(plugin_name: str) -> tuple[str, str]:
         return "暂无描述", "暂无描述"
 
 
+def normalize_version(version: str) -> str:
+    """
+    将版本号转换为 PagerMaid 兼容的 float 格式
+    PagerMaid 的 LocalPlugin.version 是 Optional[float] 类型，
+    因此版本号必须能被 float() 解析。
+
+    示例:
+    - "1.0.0" -> "1.0"
+    - "1.2.3" -> "1.23"
+    - "2.0" -> "2.0"
+    """
+    parts = version.split(".")
+    if len(parts) == 1:
+        return parts[0]
+    elif len(parts) == 2:
+        return f"{parts[0]}.{parts[1]}"
+    else:
+        # 将第二部分和第三部分合并，如 1.2.3 -> 1.23
+        return f"{parts[0]}.{parts[1]}{parts[2]}"
+
+
 def get_plugin_version(plugin_name: str) -> str:
-    """从 main.py 中提取版本号"""
+    """从 main.py 中提取版本号，并转换为 float 兼容格式"""
     main_file = PLUGIN_DIR / plugin_name / "main.py"
     if not main_file.exists():
-        return "1.0.0"
+        return "1.0"
 
     try:
         with open(main_file, "r", encoding="utf-8") as f:
@@ -73,11 +94,11 @@ def get_plugin_version(plugin_name: str) -> str:
             for pattern in version_patterns:
                 match = re.search(pattern, content)
                 if match:
-                    return match.group(1)
+                    return normalize_version(match.group(1))
     except Exception as e:
         print(f"警告: 无法读取 {plugin_name} 的版本号: {e}")
 
-    return "1.0.0"
+    return "1.0"
 
 
 def scan_plugins() -> List[Dict]:
