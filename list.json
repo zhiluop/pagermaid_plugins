@@ -49,6 +49,16 @@
             "supported": true,
             "des_short": "分享插件，将现有插件以文件形式分享，支持列表查看和序号选择",
             "des": "分享插件，将现有插件以文件形式分享，支持列表查看和序号选择"
+        },
+        {
+            "name": "ais",
+            "version": "1.0",
+            "section": "chat",
+            "maintainer": "Vibe Coding",
+            "size": "9.0 kb",
+            "supported": true,
+            "des_short": "AI查询插件，使用,ais命令向AI模型提问并返回回复，支持自定义API配置",
+            "des": "AI查询插件，使用,ais命令向AI模型提问并返回回复，支持自定义API配置、OpenAI格式API、错误处理和超时控制"
         }
     ]
 }

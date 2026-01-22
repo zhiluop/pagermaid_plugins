@@ -20,6 +20,9 @@ nul
 # VPS upload directory (not needed in git)
 .vps_uploaded/
 
+# Debug plugins directory (local use only - contains plugin copies)
+debug/
+
 # Documentation (local use only)
 docs/
 

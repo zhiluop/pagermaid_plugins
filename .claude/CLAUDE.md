@@ -67,9 +67,9 @@ tegbot_plugin/
 
 ### 部署步骤
 
-1. **上传插件到 VPS**：
+1. **自动生成插件副本并上传**：
    ```bash
-   # 上传指定插件（会覆盖旧版本）
+   # 上传指定插件（会自动创建副本并重命名）
    python .vps/deploy.py jpm
 
    # 上传所有插件
@@ -83,15 +83,22 @@ tegbot_plugin/
 
 ### 部署说明
 
+- **自动重命名**：脚本会自动将插件 main.py 复制到 `debug/` 目录，并重命名为 `<插件名>.py`
+  - 例如：`jpm/main.py` → `debug/jpm.py`
+- **自动上传**：重命名后的副本会自动上传到 VPS 的 `/home/workdir/plugins/` 目录
 - **自动覆盖**：上传会直接覆盖 VPS 上的同名文件，无需手动删除
 - **配置隔离**：VPS 连接配置存储在 `.vps_config.json`，已加入 `.gitignore`
-- **安全性**：敏感信息不会上传到 GitHub 仓库
+- **安全性**：
+  - `debug/` 目录已加入 `.gitignore`，不会上传到 GitHub
+  - `.vps/` 目录已加入 `.gitignore`，包含敏感配置
+  - 所有敏感信息不会上传到 GitHub 仓库
 
 ### 部署时机
 
+**每次**修改或开发插件后**必须**执行：
 - [ ] 插件脚本修改完成
-- [ ] 文档同步更新完成
-- [ ] 本地测试通过
+- [ ] 运行 `python .vps/deploy.py <插件名>` 上传插件
+- [ ] 在 Telegram 中执行 `/reload` 重载插件
 
 ### 参考文档
 
