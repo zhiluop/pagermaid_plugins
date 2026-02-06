@@ -243,6 +243,7 @@ class JPMAIConfigManager:
     def __init__(self):
         self.enabled: bool = False  # 插件总开关
         self.owner_id: Optional[int] = None  # 插件所有者ID
+        self.owner_only: bool = False  # 仅主人触发开关
         self.api_url: Optional[str] = None  # API 地址
         self.api_key: Optional[str] = None  # API 密钥
         self.model: str = DEFAULT_MODEL  # 模型名称
@@ -259,11 +260,11 @@ class JPMAIConfigManager:
                     data = json.load(f)
                     self.enabled = data.get("enabled", False)
                     self.owner_id = data.get("owner_id")
+                    self.owner_only = data.get("owner_only", False)
                     self.api_url = data.get("api_url")
                     self.api_key = data.get("api_key")
                     self.model = data.get("model", DEFAULT_MODEL)
                     self.keywords = data.get("keywords", {})
-                logs.info(f"JPMAI 配置已加载，共 {len(self.keywords)} 个关键词")
             except Exception as e:
                 logs.error(f"加载 JPMAI 配置失败: {e}")
                 self._reset()
@@ -274,6 +275,7 @@ class JPMAIConfigManager:
         """重置配置"""
         self.enabled = False
         self.owner_id = None
+        self.owner_only = False
         self.api_url = None
         self.api_key = None
         self.model = DEFAULT_MODEL
@@ -287,6 +289,7 @@ class JPMAIConfigManager:
                     {
                         "enabled": self.enabled,
                         "owner_id": self.owner_id,
+                        "owner_only": self.owner_only,
                         "api_url": self.api_url,
                         "api_key": self.api_key,
                         "model": self.model,
@@ -296,7 +299,6 @@ class JPMAIConfigManager:
                     indent=4,
                     ensure_ascii=False,
                 )
-            logs.info("JPMAI 配置已保存")
             return True
         except Exception as e:
             logs.error(f"保存 JPMAI 配置失败: {e}")
@@ -489,7 +491,7 @@ trigger_log = TriggerLogManager()
 @listener(
     command="jpmai",
     description="JPMAI 插件管理 - AI 生成艳情文案",
-    parameters="<on|off|set|delete|list|owner|status|anchor|api|model|test> 或 <关键词> <on|off>",
+    parameters="<on|off|set|delete|list|owner|status|anchor|api|model|test|owner_only> 或 <关键词> <on|off>",
     is_plugin=True,
 )
 async def jpmai_command(message: Message):
@@ -540,6 +542,8 @@ async def jpmai_command(message: Message):
         await set_model(message)
     elif cmd == "test":
         await test_connectivity(message)
+    elif cmd == "owner_only":
+        await toggle_owner_only(message)
     else:
         await show_help(message)
 
@@ -570,6 +574,7 @@ async def show_help(message: Message):
 
 **,jpmai on** - 开启全局功能
 **,jpmai off** - 关闭全局功能
+**,jpmai owner_only** - 切换仅主人触发模式
 **,jpmai <关键词> on** - 开启指定关键词
 **,jpmai <关键词> off** - 关闭指定关键词
 **,jpmai api <URL> <密钥> [模型]** - 设置 API 配置
@@ -593,6 +598,10 @@ async def show_help(message: Message):
 `,jpmai keyword1 on` - 开启关键词 keyword1
 `,jpmai keyword2 off` - 关闭关键词 keyword2
 
+**仅主人模式:**
+- 使用 `,jpmai owner_only` 开启/关闭仅主人触发模式
+- 开启后，只有主人可以触发关键词，其他人无法触发
+
 **测试功能:**
 - 使用 `,jpmai test` 测试单人/双人文案生成的连通性
 - 测试时会自动生成一段单人文案和双人文案，验证 API 是否正常工作
@@ -606,6 +615,7 @@ async def show_help(message: Message):
 - 内置自动重试机制：API 超时或失败时自动重试1次
 - 支持灵活切换模型：可随时更换不同的 AI 模型
 - 关键词独立开关：每个关键词可单独开启/关闭
+- 仅主人模式：开启后只有主人可以触发
 - 测试功能：验证 AI 生成连通性，确保配置正确"""
     await message.edit(help_text)
 
@@ -840,21 +850,17 @@ async def test_connectivity(message: Message):
 
     # 开始测试
     await message.edit("⏳ 正在测试 AI 生成的连通性...\n\n正在测试单人模式...")
-    logs.info("[JPMAI] 开始测试单人模式")
 
     # 测试单人模式
     try:
         single_result = await generator.generate_single("测试用户")
-        logs.info(f"[JPMAI] 单人模式测试成功")
 
         # 测试双人模式
         await message.edit(
             "⏳ 正在测试 AI 生成的连通性...\n\n✅ 单人模式测试成功\n\n正在测试双人模式..."
         )
-        logs.info("[JPMAI] 开始测试双人模式")
 
         dual_result = await generator.generate_dual("测试用户A", "测试用户B")
-        logs.info(f"[JPMAI] 双人模式测试成功")
 
         # 显示测试结果
         test_result = f"""**✅ AI 生成连通性测试成功！**
@@ -872,8 +878,21 @@ API地址: `{config_manager.api_url}`"""
         await message.edit(test_result)
 
     except Exception as e:
-        logs.error(f"[JPMAI] 连通性测试失败: {e}")
         await message.edit(f"❌ 连通性测试失败\n错误: {e}")
+
+
+async def toggle_owner_only(message: Message):
+    """切换仅主人触发模式"""
+    if not check_permission(message):
+        await message.edit("❌ 权限不足！只有主人可以执行此操作")
+        return
+
+    config_manager.owner_only = not config_manager.owner_only
+    config_manager.save()
+
+    status = "✅ 已开启" if config_manager.owner_only else "❌ 已关闭"
+    mode_text = "仅主人可触发" if config_manager.owner_only else "所有人可触发"
+    await message.edit(f"{status} 仅主人模式\n\n当前: {mode_text}")
 
 
 async def get_target_user_last_message(
@@ -964,6 +983,13 @@ async def trigger_jpmai(message: Message, bot: Client):
     trigger_user_id = message.from_user.id if message.from_user else None
     if not trigger_user_id:
         return
+
+    # 检查是否开启仅主人模式
+    if config_manager.owner_only:
+        if not config_manager.owner_id:
+            return
+        if trigger_user_id != config_manager.owner_id:
+            return
 
     # 检查是否是主人
     is_owner = (
