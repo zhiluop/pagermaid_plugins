@@ -59,6 +59,26 @@
             "supported": true,
             "des_short": "AI查询插件，使用,ais命令向AI模型提问并返回回复，支持自定义API配置",
             "des": "AI查询插件，使用,ais命令向AI模型提问并返回回复，支持自定义API配置、OpenAI格式API、错误处理和超时控制"
+        },
+        {
+            "name": "stfollow",
+            "version": "1.0",
+            "section": "chat",
+            "maintainer": "Vibe Coding",
+            "size": "8.9 kb",
+            "supported": true,
+            "des_short": "贴纸跟随插件，在特定群组中自动跟随发送特定贴纸",
+            "des": "贴纸跟随插件，在特定群组中当有人发送特定贴纸时自动跟随发送同一个贴纸"
+        },
+        {
+            "name": "sar",
+            "version": "1.0",
+            "section": "chat",
+            "maintainer": "Vibe Coding",
+            "size": "9.5 kb",
+            "supported": true,
+            "des_short": "贴纸自动回复插件，当有人用贴纸回复你的消息时，自动回复相同的贴纸",
+            "des": "贴纸自动回复插件，在指定群组中当有人用贴纸回复你的消息时，自动回复相同的贴纸"
         }
     ]
 }
