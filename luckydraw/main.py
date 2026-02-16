@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# 插件名称: luckydraw
+# 生成时间: 2026-02-16 17:00
+
 """
 自动抽奖插件 (LuckyDraw)
 功能描述: 在指定群组中自动识别红包/抽奖活动并发送口令参与
@@ -34,11 +38,12 @@ SCRIPT_DETECTION_KEYWORDS = [
     "脚本检测",
     "自动领",
     "作弊",
+    "挂",
 ]
 
 # 抢红包随机延迟范围（秒）
-MIN_DELAY = 0.5
-MAX_DELAY = 2.0
+MIN_DELAY = 2.0
+MAX_DELAY = 5.0
 
 
 class LuckyDrawConfig:
@@ -48,6 +53,7 @@ class LuckyDrawConfig:
         self.enabled_chats: Set[int] = set()  # 启用功能的群组ID集合
         self.test_chats: Set[int] = set()  # 测试群组（输出详细日志）
         self.sent_keywords: Dict[str, list] = {}  # 已发送的口令 {群组ID: [口令1, 口令2, ...]}
+        self.sent_messages: Set[str] = set()  # 已处理的消息ID {群组ID_消息ID}
         self.stats: Dict[str, int] = {
             "total_detected": 0,  # 检测到的抽奖次数
             "total_joined": 0,    # 成功参与的次数
@@ -64,12 +70,14 @@ class LuckyDrawConfig:
                     self.enabled_chats = set(data.get("enabled_chats", []))
                     self.test_chats = set(data.get("test_chats", []))
                     self.sent_keywords = data.get("sent_keywords", {})
+                    self.sent_messages = set(data.get("sent_messages", []))
                     self.stats = data.get("stats", self.stats)
             except Exception as e:
                 logs.error(f"[LuckyDraw] 加载配置失败: {e}")
                 self.enabled_chats = set()
                 self.test_chats = set()
                 self.sent_keywords = {}
+                self.sent_messages = set()
                 self.stats = {"total_detected": 0, "total_joined": 0, "total_blocked": 0}
         else:
             self.save()
@@ -83,6 +91,7 @@ class LuckyDrawConfig:
                         "enabled_chats": list(self.enabled_chats),
                         "test_chats": list(self.test_chats),
                         "sent_keywords": self.sent_keywords,
+                        "sent_messages": list(self.sent_messages),
                         "stats": self.stats,
                     },
                     f,
@@ -149,6 +158,20 @@ class LuckyDrawConfig:
         if keyword not in self.sent_keywords[key]:
             self.sent_keywords[key].append(keyword)
             self.save()
+
+    def is_message_processed(self, chat_id: int, message_id: int) -> bool:
+        """检查消息是否已处理"""
+        key = f"{chat_id}_{message_id}"
+        return key in self.sent_messages
+
+    def mark_message_processed(self, chat_id: int, message_id: int) -> None:
+        """标记消息已处理"""
+        key = f"{chat_id}_{message_id}"
+        self.sent_messages.add(key)
+        # 保持集合不要太大，限制1000条
+        if len(self.sent_messages) > 1000:
+            self.sent_messages = set(list(self.sent_messages)[-500:])
+        self.save()
 
     def clear_sent_keywords(self, chat_id: int = None) -> str:
         """清除已发送口令记录"""
@@ -505,10 +528,6 @@ async def luckydraw_handler(message: Message, bot: Client):
 
     检测传入的消息，识别红包/抽奖活动并自动发送口令参与
     """
-    # 检查是否有消息文本
-    if not message.text:
-        return
-
     # 检查是否在群组中
     if not message.chat:
         return
@@ -522,11 +541,41 @@ async def luckydraw_handler(message: Message, bot: Client):
             logs.info(f"[LuckyDraw] 群组 {chat_id} 未启用，跳过")
         return
 
-    # 获取消息文本
-    text = message.text
-
+    # 打印所有消息属性用于调试
     if is_test:
-        logs.info(f"[LuckyDraw] 收到群组 {chat_id} 的消息:\n{text[:200]}...")
+        logs.info(f"[LuckyDraw] ===== 收到消息 =====")
+        logs.info(f"[LuckyDraw] message.text: {message.text}")
+        logs.info(f"[LuckyDraw] message.caption: {getattr(message, 'caption', 'N/A')}")
+        logs.info(f"[LuckyDraw] message.raw_text: {getattr(message, 'raw_text', 'N/A')}")
+        logs.info(f"[LuckyDraw] message.forward_from: {message.forward_from}")
+        logs.info(f"[LuckyDraw] message.forward_from_chat: {message.forward_from_chat}")
+        logs.info(f"[LuckyDraw] message.media: {getattr(message, 'media', 'N/A')}")
+        logs.info(f"[LuckyDraw] message.chat.id: {chat_id}")
+
+    # 尝试获取消息文本（支持转发消息和媒体消息）
+    text = message.text
+    if not text:
+        # 尝试获取 media 的 caption
+        text = getattr(message, 'caption', None)
+    if not text:
+        text = getattr(message, 'raw_text', None)
+    
+    if is_test:
+        logs.info(f"[LuckyDraw] 最终获取的text: {text[:100] if text else 'None'}...")
+
+    # 检查是否有消息文本
+    if not text:
+        if is_test:
+            logs.info(f"[LuckyDraw] 无法获取消息文本，跳过")
+        return
+
+    # 检查消息是否已处理（去重）
+    message_id = message.id
+    if config.is_message_processed(chat_id, message_id):
+        if is_test:
+            logs.info(f"[LuckyDraw] 消息已处理过，跳过 | message_id: {message_id}")
+        return
+    config.mark_message_processed(chat_id, message_id)
 
     # 提取口令
     result = KeywordExtractor.extract(text)
@@ -555,16 +604,19 @@ async def luckydraw_handler(message: Message, bot: Client):
         config.increment_blocked()
         logs.warning(f"[LuckyDraw] 拦截可疑抽奖: {reason}, 口令: {keyword}")
         if is_test:
-            await message.reply(f"⚠️ 安全拦截: {reason}")
+            try:
+                await bot.send_message(chat_id, f"⚠️ 安全拦截: {reason}")
+            except Exception:
+                pass
         return
 
     # 随机延迟，避免被检测为脚本
     delay = random.uniform(MIN_DELAY, MAX_DELAY)
     await asyncio.sleep(delay)
 
-    # 发送口令
+    # 发送口令（直接发送到群组，而不是回复）
     try:
-        await message.reply(keyword)
+        await bot.send_message(chat_id, keyword)
         # 标记口令已发送
         config.mark_keyword_sent(chat_id, keyword)
         config.increment_joined()
@@ -579,6 +631,9 @@ async def luckydraw_handler(message: Message, bot: Client):
         logs.info(log_msg)
         
         if is_test:
-            await message.reply(f"✅ 已发送口令: {keyword}")
+            try:
+                await bot.send_message(chat_id, f"✅ 已发送口令: {keyword}")
+            except Exception:
+                pass
     except Exception as e:
         logs.error(f"[LuckyDraw] 发送口令失败: {e}")
