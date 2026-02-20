@@ -41,9 +41,25 @@ SCRIPT_DETECTION_KEYWORDS = [
     "挂",
 ]
 
-# 抢红包随机延迟范围（秒）
-MIN_DELAY = 2.0
-MAX_DELAY = 5.0
+# 抢红包随机延迟范围（秒）- 默认值
+DEFAULT_MIN_DELAY = 2.0
+DEFAULT_MAX_DELAY = 5.0
+
+# 等待其他用户回复的时间范围（秒）
+WAIT_MIN_DELAY = 3.0
+WAIT_MAX_DELAY = 8.0
+
+# 需要等待的其他用户回复数量（随机1-2人）
+WAIT_USER_COUNT_MIN = 1
+WAIT_USER_COUNT_MAX = 2
+
+# 群组默认延时配置
+DEFAULT_DELAY = 2.0  # 秒
+
+# 默认抽奖机器人ID白名单（首次使用时写入配置文件）
+DEFAULT_BOT_WHITELIST: Set[int] = {
+    6461022460,  # 抽奖机器人
+}
 
 
 class LuckyDrawConfig:
@@ -54,6 +70,8 @@ class LuckyDrawConfig:
         self.test_chats: Set[int] = set()  # 测试群组（输出详细日志）
         self.sent_keywords: Dict[str, list] = {}  # 已发送的口令 {群组ID: [口令1, 口令2, ...]}
         self.sent_messages: Set[str] = set()  # 已处理的消息ID {群组ID_消息ID}
+        self.chat_delays: Dict[str, dict] = {}  # 群组延时配置 {群组ID: {"min": min_delay, "max": max_delay}}
+        self.bot_whitelist: Set[int] = set()  # 抽奖机器人白名单
         self.stats: Dict[str, int] = {
             "total_detected": 0,  # 检测到的抽奖次数
             "total_joined": 0,    # 成功参与的次数
@@ -71,15 +89,21 @@ class LuckyDrawConfig:
                     self.test_chats = set(data.get("test_chats", []))
                     self.sent_keywords = data.get("sent_keywords", {})
                     self.sent_messages = set(data.get("sent_messages", []))
+                    self.chat_delays = data.get("chat_delays", {})
+                    self.bot_whitelist = set(data.get("bot_whitelist", DEFAULT_BOT_WHITELIST))
                     self.stats = data.get("stats", self.stats)
             except Exception as e:
                 logs.error(f"[LuckyDraw] 加载配置失败: {e}")
                 self.enabled_chats = set()
                 self.test_chats = set()
                 self.sent_keywords = {}
-                self.sent_messages = set()
+                self.sent_messages = {}
+                self.chat_delays = {}
+                self.bot_whitelist = set(DEFAULT_BOT_WHITELIST)
                 self.stats = {"total_detected": 0, "total_joined": 0, "total_blocked": 0}
         else:
+            # 首次使用，使用默认白名单
+            self.bot_whitelist = set(DEFAULT_BOT_WHITELIST)
             self.save()
 
     def save(self) -> bool:
@@ -92,6 +116,8 @@ class LuckyDrawConfig:
                         "test_chats": list(self.test_chats),
                         "sent_keywords": self.sent_keywords,
                         "sent_messages": list(self.sent_messages),
+                        "chat_delays": self.chat_delays,
+                        "bot_whitelist": list(self.bot_whitelist),
                         "stats": self.stats,
                     },
                     f,
@@ -142,6 +168,49 @@ class LuckyDrawConfig:
         self.test_chats.remove(chat_id)
         self.save()
         return f"已移除群组 `{chat_id}` 从测试群组"
+
+    def get_chat_delay(self, chat_id: int) -> tuple[float, float]:
+        """获取群组的延时配置 (min_delay, max_delay)"""
+        key = str(chat_id)
+        if key in self.chat_delays:
+            return (
+                self.chat_delays[key].get("min", DEFAULT_DELAY),
+                self.chat_delays[key].get("max", DEFAULT_DELAY)
+            )
+        return (DEFAULT_DELAY, DEFAULT_DELAY)
+
+    def set_chat_delay(self, chat_id: int, min_delay: float, max_delay: float = None) -> str:
+        """设置群组的延时配置"""
+        key = str(chat_id)
+        if max_delay is None:
+            max_delay = min_delay + 3.0  # 如果只设置一个值，范围为 [delay, delay+3]
+        
+        # 限制范围
+        min_delay = max(0.1, min_delay)
+        max_delay = max(min_delay, max_delay)
+        
+        self.chat_delays[key] = {"min": min_delay, "max": max_delay}
+        self.save()
+        return f"已设置群组 `{chat_id}` 延时为 {min_delay}~{max_delay} 秒"
+
+    def remove_chat_delay(self, chat_id: int) -> str:
+        """移除群组的自定义延时配置，恢复默认"""
+        key = str(chat_id)
+        if key in self.chat_delays:
+            del self.chat_delays[key]
+            self.save()
+            return f"已移除群组 `{chat_id}` 的自定义延时，恢复默认 {DEFAULT_DELAY} 秒"
+        return f"群组 `{chat_id}` 未设置自定义延时"
+
+    def list_chat_delays(self) -> str:
+        """列出所有群组的延时配置"""
+        if not self.chat_delays:
+            return "暂无自定义延时配置，默认延时 2 秒"
+        
+        output = "**群组延时配置列表：**\n\n"
+        for chat_id, delay in self.chat_delays.items():
+            output += f"- 群组 `{chat_id}`: {delay['min']}~{delay['max']} 秒\n"
+        return output
 
     def has_sent_keyword(self, chat_id: int, keyword: str) -> bool:
         """检查口令是否已发送"""
@@ -195,6 +264,39 @@ class LuckyDrawConfig:
             output += f"- 群组ID: `{chat_id}`\n"
         return output
 
+    # ========== 机器人白名单管理 ==========
+
+    def add_bot(self, bot_id: int) -> str:
+        """添加机器人到白名单"""
+        if bot_id in self.bot_whitelist:
+            return f"机器人 `{bot_id}` 已在白名单中"
+        self.bot_whitelist.add(bot_id)
+        self.save()
+        return f"已添加机器人 `{bot_id}` 到白名单"
+
+    def remove_bot(self, bot_id: int) -> str:
+        """从白名单移除机器人"""
+        if bot_id not in self.bot_whitelist:
+            return f"机器人 `{bot_id}` 不在白名单中"
+        self.bot_whitelist.remove(bot_id)
+        self.save()
+        return f"已从白名单移除机器人 `{bot_id}`"
+
+    def is_bot_allowed(self, bot_id: int) -> bool:
+        """检查机器人是否在白名单中"""
+        return bot_id in self.bot_whitelist
+
+    def list_bots(self) -> str:
+        """列出所有白名单机器人"""
+        if not self.bot_whitelist:
+            return "当前白名单为空，所有抽奖消息都会被忽略"
+
+        output = "**机器人白名单：**\n\n"
+        for bot_id in self.bot_whitelist:
+            output += f"- 机器人ID: `{bot_id}`\n"
+        output += "\n💡 只有这些机器人发布的抽奖才会参与"
+        return output
+
     def get_stats(self) -> str:
         """获取统计信息"""
         output = "**统计信息：**\n\n"
@@ -224,6 +326,59 @@ class LuckyDrawConfig:
 config = LuckyDrawConfig()
 
 
+# 待发送口令队列 {chat_id: {message_id: {"keyword": keyword, "type": keyword_type, "wait_count": int, "current_count": int}}}
+pending_draws: Dict[str, dict] = {}
+
+
+def check_red_packet_finished(text: str, chat_id: int, is_test: bool) -> bool:
+    """
+    检查红包是否已领完，如果是则清除该口令记录
+    返回: 是否处理了这个消息
+    """
+    # 红包已领完的模式
+    finished_patterns = [
+        r"已领完",
+        r"已领取完毕",
+        r"红包已被领完",
+        r"领取详情:",
+    ]
+    
+    for pattern in finished_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            # 提取红包ID
+            red_packet_id_match = re.search(r"(?:红包ID|ID|ID:)[^\d]*(\w+)", text, re.IGNORECASE)
+            red_packet_id = red_packet_id_match.group(1) if red_packet_id_match else None
+            
+            # 提取红包口令（如果有）
+            result = KeywordExtractor.extract(text)
+            if result:
+                keyword, _ = result
+                # 清除这个口令的记录
+                if config.has_sent_keyword(chat_id, keyword):
+                    # 重新添加已发送的关键字记录，这样下次相同口令就能发送了
+                    key = str(chat_id)
+                    if key in config.sent_keywords and keyword in config.sent_keywords[key]:
+                        config.sent_keywords[key].remove(keyword)
+                        config.save()
+                        logs.info(f"[LuckyDraw] 红包已领完，清除口令记录: {keyword}")
+                        if is_test:
+                            return True
+                    return True
+            
+            # 如果没有提取到口令，清除最近一个口令（保守处理）
+            key = str(chat_id)
+            if key in config.sent_keywords and config.sent_keywords[key]:
+                removed_keyword = config.sent_keywords[key].pop()
+                config.save()
+                logs.info(f"[LuckyDraw] 红包已领完，清除最近口令记录: {removed_keyword}")
+                if is_test:
+                    logs.info(f"[LuckyDraw] 检测到红包已领完，已清除最近口令记录")
+            
+            return True
+    
+    return False
+
+
 class KeywordExtractor:
     """口令提取器"""
 
@@ -233,8 +388,8 @@ class KeywordExtractor:
         (r"领取密令[：:]\s*(.+?)(?:\n|$)", "密令抽奖"),
         # 格式2: 参与关键词：「xxx」 或 参与关键词：xxx
         (r"参与关键词[：:]\s*[「「\"]?(.+?)[」」\"]?(?:\n|$)", "参与关键词"),
-        # 格式3: 发送 xxx 进行领取 / 发送 xxx 领取
-        (r"发送\s+(.+?)\s+(?:进行)?领取", "红包口令"),
+        # 格式3: 发送 xxx 进行领取 / 发送 xxx 领取 / 发送下方口令领取：xxx
+        (r"发送.+(?:领取)[：:]?\s*(.+?)(?:\n|$)", "红包口令"),
         # 格式4: 输入口令: xxx / 口令: xxx
         (r"(?:输入)?口令[：:]\s*(.+?)(?:\n|$)", "口令"),
         # 格式5: 回复 xxx 领取 / 回复 xxx 参与
@@ -322,6 +477,10 @@ async def ldraw_command(message: Message):
         await disable_chat(message)
     elif cmd == "set":
         await set_chat(message)
+    elif cmd == "delay":
+        await set_delay(message)
+    elif cmd == "listdelay":
+        await list_delays(message)
     elif cmd == "list":
         await list_chats(message)
     elif cmd == "stats":
@@ -332,6 +491,8 @@ async def ldraw_command(message: Message):
         await test_extract(message)
     elif cmd == "clear":
         await clear_keywords(message)
+    elif cmd == "bot":
+        await manage_bot(message)
     else:
         await show_help(message)
 
@@ -341,33 +502,37 @@ async def show_help(message: Message):
     help_text = """**自动抽奖插件使用说明**
 
 **功能描述：**
-在启用功能的群组中，自动识别红包/抽奖活动消息并发送口令参与。
+在启用功能的群组中，自动识别抽奖活动消息并发送口令参与。
 每个口令只发送一次，不会重复发送。
 
-**支持的口令格式：**
-- `领取密令: xxx` → 发送 xxx
-- `参与关键词：「xxx」` → 发送 xxx
-- `发送 xxx 进行领取` → 发送 xxx
-- `口令: xxx` → 发送 xxx
-
-**安全检测：**
-如果消息或口令中包含以下关键词，将自动跳过：
-脚本、检测、不能领、禁止脚本、防脚本等
+**⚠️ 重要：机器人白名单机制**
+只响应白名单中机器人发布的抽奖消息，忽略其他用户发布的抽奖。
 
 **管理命令：**
+
+`,ldraw bot list` - 查看白名单机器人
+`,ldraw bot add <ID>` - 添加机器人到白名单
+`,ldraw bot del <ID>` - 从白名单移除机器人
 
 `,ldraw set <群组ID>` - 启用指定群组
 `,ldraw set <群组ID> off` - 禁用指定群组
 `,ldraw set <群组ID> test` - 添加到测试群组（输出详细日志）
-`,ldraw set <群组ID> test off` - 从测试群组移除
+
+`,ldraw delay <延时>` - 设置当前群组延时
+`,ldraw delay <最小> <最大>` - 设置精确延时范围
+`,ldraw listdelay` - 查看所有群组延时配置
 `,ldraw list` - 查看所有启用的群组
 `,ldraw stats` - 查看统计信息
 `,ldraw test <文本>` - 测试口令提取功能
 `,ldraw clear` - 清除已发送口令记录
 
+**支持的口令格式：**
+- `领取密令: xxx` → 发送 xxx
+- `参与关键词：「xxx」` → 发送 xxx
+- `口令: xxx` → 发送 xxx
+
 **注意事项：**
-- 为避免被检测，插件会随机延迟 0.5-2 秒发送口令
-- 建议在信任的群组中使用此功能
+- 为避免被检测，插件会随机延迟后发送口令
 - 测试群组会输出详细日志方便调试"""
 
     await message.edit(help_text)
@@ -518,6 +683,140 @@ async def clear_keywords(message: Message):
     await message.delete()
 
 
+async def manage_bot(message: Message):
+    """管理机器人白名单"""
+    params = message.arguments.split()
+    
+    if len(params) < 2:
+        await message.edit(
+            "**参数错误！**\n\n"
+            "使用方法:\n"
+            "`,ldraw bot list` - 查看白名单机器人列表\n"
+            "`,ldraw bot add <机器人ID>` - 添加机器人到白名单\n"
+            "`,ldraw bot del <机器人ID>` - 从白名单移除机器人\n\n"
+            "示例:\n"
+            "`,ldraw bot add 6461022460`\n"
+            "`,ldraw bot del 6461022460`"
+        )
+        await asyncio.sleep(8)
+        await message.delete()
+        return
+    
+    action = params[1].lower()
+    
+    if action == "list":
+        result = config.list_bots()
+        await message.edit(result)
+        await asyncio.sleep(5)
+        await message.delete()
+        return
+    
+    if len(params) < 3:
+        await message.edit("**参数错误！**\n\n需要指定机器人ID")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+    
+    try:
+        bot_id = int(params[2])
+    except ValueError:
+        await message.edit("**机器人ID格式错误！**\n\n请输入有效的数字ID")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+    
+    if action == "add":
+        result = config.add_bot(bot_id)
+    elif action in ["del", "remove", "delete"]:
+        result = config.remove_bot(bot_id)
+    else:
+        await message.edit("**未知操作！**\n\n支持的操作: add, del")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+    
+    await message.edit(f"**{result}**")
+    await asyncio.sleep(3)
+    await message.delete()
+
+
+async def set_delay(message: Message):
+    """设置群组的延时"""
+    params = message.arguments.split()
+    
+    if len(params) < 2:
+        await message.edit(
+            "**参数错误！**\n\n"
+            "使用方法:\n"
+            "`,ldraw delay <延时秒数>` - 设置当前群组延时（最小~最大范围自动+3秒）\n"
+            "`,ldraw delay <最小延时> <最大延时>` - 设置精确范围\n"
+            "`,ldraw delay <群组ID> <延时>` - 设置指定群组延时\n"
+            "`,ldraw delay off` - 移除当前群组的自定义延时\n\n"
+            "示例:\n"
+            "`,ldraw delay 0.5` - 设置延时 0.5~3.5 秒\n"
+            "`,ldraw delay 2 5` - 设置延时 2~5 秒\n"
+            "`,ldraw delay -1001234567890 3` - 设置指定群组延时 3~6 秒"
+        )
+        await asyncio.sleep(10)
+        await message.delete()
+        return
+    
+    # 判断是设置还是移除
+    if params[1].lower() == "off":
+        # 移除当前群组的延时配置
+        if not message.chat or message.chat.id > 0:
+            await message.edit("此命令只能在群组中使用")
+            await asyncio.sleep(3)
+            await message.delete()
+            return
+        chat_id = message.chat.id
+        result = config.remove_chat_delay(chat_id)
+        await message.edit(f"**{result}**")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+    
+    # 解析参数
+    try:
+        # 判断第一个参数是否是群组ID（负数）
+        if params[1].startswith("-"):
+            if len(params) < 3:
+                await message.edit("**参数错误！**\n\n需要指定延时值")
+                await asyncio.sleep(3)
+                await message.delete()
+                return
+            chat_id = int(params[1])
+            min_delay = float(params[2])
+            max_delay = float(params[3]) if len(params) > 3 else None
+        else:
+            # 当前群组
+            if not message.chat or message.chat.id > 0:
+                await message.edit("此命令只能在群组中使用")
+                await asyncio.sleep(3)
+                await message.delete()
+                return
+            chat_id = message.chat.id
+            min_delay = float(params[1])
+            max_delay = float(params[2]) if len(params) > 2 else None
+        
+        result = config.set_chat_delay(chat_id, min_delay, max_delay)
+        await message.edit(f"**{result}**")
+        await asyncio.sleep(3)
+        await message.delete()
+    except ValueError:
+        await message.edit("**参数错误！**\n\n请输入有效的数字")
+        await asyncio.sleep(3)
+        await message.delete()
+
+
+async def list_delays(message: Message):
+    """列出所有群组的延时配置"""
+    result = config.list_chat_delays()
+    await message.edit(result)
+    await asyncio.sleep(5)
+    await message.delete()
+
+
 # ==================== 自动抽奖监听器 ====================
 
 
@@ -551,6 +850,33 @@ async def luckydraw_handler(message: Message, bot: Client):
         logs.info(f"[LuckyDraw] message.forward_from_chat: {message.forward_from_chat}")
         logs.info(f"[LuckyDraw] message.media: {getattr(message, 'media', 'N/A')}")
         logs.info(f"[LuckyDraw] message.chat.id: {chat_id}")
+        logs.info(f"[LuckyDraw] message.sender_id: {getattr(message, 'sender_id', 'N/A')}")
+
+    # ========== 机器人ID检测 ==========
+    # 只处理白名单中机器人发布的抽奖消息
+    sender_id = getattr(message, "sender_id", None)
+    
+    # 检查是否是转发的消息（转发消息需要检查原始发送者）
+    forward_from = getattr(message, "forward_from", None)
+    forward_from_chat = getattr(message, "forward_from_chat", None)
+    
+    # 确定实际的发送者ID
+    actual_sender_id = sender_id
+    if forward_from:
+        # 转发自用户
+        actual_sender_id = getattr(forward_from, "id", sender_id)
+    elif forward_from_chat:
+        # 转发自频道/群组
+        actual_sender_id = getattr(forward_from_chat, "id", sender_id)
+    
+    # 检查发送者是否在白名单中
+    if not config.is_bot_allowed(actual_sender_id):
+        if is_test:
+            logs.info(f"[LuckyDraw] 发送者 {actual_sender_id} 不在白名单中，跳过")
+        return
+    
+    if is_test:
+        logs.info(f"[LuckyDraw] 发送者 {actual_sender_id} 在白名单中，继续处理")
 
     # 尝试获取消息文本（支持转发消息和媒体消息）
     text = message.text
@@ -567,6 +893,10 @@ async def luckydraw_handler(message: Message, bot: Client):
     if not text:
         if is_test:
             logs.info(f"[LuckyDraw] 无法获取消息文本，跳过")
+        return
+
+    # 检查是否红包已领完，如果是则清除该口令记录
+    if check_red_packet_finished(text, chat_id, is_test):
         return
 
     # 检查消息是否已处理（去重）
@@ -610,30 +940,147 @@ async def luckydraw_handler(message: Message, bot: Client):
                 pass
         return
 
-    # 随机延迟，避免被检测为脚本
-    delay = random.uniform(MIN_DELAY, MAX_DELAY)
-    await asyncio.sleep(delay)
+    # 直接延时发送（不再等待其他用户回复）
 
-    # 发送口令（直接发送到群组，而不是回复）
-    try:
-        await bot.send_message(chat_id, keyword)
-        # 标记口令已发送
-        config.mark_keyword_sent(chat_id, keyword)
-        config.increment_joined()
+    # 检查是否已有相同口令在队列中，避免重复加入
+    for existing_key, existing_pending in pending_draws.items():
+        if existing_pending.get("keyword") == keyword and existing_pending.get("chat_id") == chat_id:
+            if is_test:
+                logs.info(f"[LuckyDraw] 相同口令已在队列中，跳过 | 口令: {keyword}")
+            return
+    
+    # 将口令加入待发送队列
+    queue_key = f"{chat_id}_{message_id}"
+    pending_draws[queue_key] = {
+        "keyword": keyword,
+        "keyword_type": keyword_type,
+        "chat_id": chat_id,
+    }
+    
+    # 获取群组的延时配置
+    min_delay, max_delay = config.get_chat_delay(chat_id)
+    delay = random.uniform(min_delay, max_delay)
+    
+    # 延时后发送
+    await asyncio.sleep(delay)
+    
+    # 检查是否已发送过（避免重复发送）
+    if config.has_sent_keyword(chat_id, keyword):
+        if is_test:
+            logs.info(f"[LuckyDraw] 口令已发送过，跳过 | 口令: {keyword}")
+    else:
+        # 发送口令
+        try:
+            await bot.send_message(chat_id, keyword)
+            config.mark_keyword_sent(chat_id, keyword)
+            config.increment_joined()
+            
+            log_msg = (
+                f"[LuckyDraw] 成功参与抽奖 | "
+                f"群组: {chat_id} | "
+                f"类型: {keyword_type} | "
+                f"口令: {keyword} | "
+                f"延迟: {delay:.2f}s"
+            )
+            logs.info(log_msg)
+            
+            if is_test:
+                try:
+                    await bot.send_message(chat_id, f"✅ 已发送口令: {keyword}")
+                except Exception:
+                    pass
+        except Exception as e:
+            logs.error(f"[LuckyDraw] 发送口令失败: {e}")
+    
+    # 从队列中移除
+    if queue_key in pending_draws:
+        del pending_draws[queue_key]
+
+
+# ==================== 监听其他用户回复 ====================
+
+
+@listener(is_plugin=True, incoming=True, outgoing=False, ignore_edited=True)
+async def luckydraw_reply_handler(message: Message, bot: Client):
+    """
+    监听其他用户回复，触发口令发送
+    """
+    # 检查是否在群组中
+    if not message.chat:
+        return
+
+    chat_id = message.chat.id
+    is_test = config.is_test_chat(chat_id)
+
+    # 检查是否在启用的群组中
+    if not config.is_enabled(chat_id):
+        return
+
+    # 检查消息是否已处理（去重）- 避免重复计数
+    message_id = message.id
+    if config.is_message_processed(chat_id, message_id):
+        return
+    
+    # 检查是否是机器人自己的消息
+    sender = getattr(message, "sender_id", None)
+    bot_id = (await bot.get_me()).id
+    if sender == bot_id:
+        return
+
+    # 检查是否有待发送的口令
+    pending_keys = [k for k in pending_draws.keys() if k.startswith(f"{chat_id}_")]
+    if not pending_keys:
+        return
+
+    # 遍历待发送队列，检查是否有匹配的
+    for queue_key in list(pending_draws.keys()):
+        if not queue_key.startswith(f"{chat_id}_"):
+            continue
+            
+        pending = pending_draws[queue_key]
         
-        log_msg = (
-            f"[LuckyDraw] 成功参与抽奖 | "
-            f"群组: {chat_id} | "
-            f"类型: {keyword_type} | "
-            f"口令: {keyword} | "
-            f"延迟: {delay:.2f}s"
-        )
-        logs.info(log_msg)
+        # 增加当前回复计数
+        pending["current_count"] += 1
         
         if is_test:
+            logs.info(f"[LuckyDraw] 用户回复，当前: {pending['current_count']}/{pending['wait_count']}")
+        
+        # 检查是否满足发送条件
+        if pending["current_count"] >= pending["wait_count"]:
+            keyword = pending["keyword"]
+            keyword_type = pending["keyword_type"]
+            
+            # 获取群组的延时配置
+            min_delay, max_delay = config.get_chat_delay(chat_id)
+            # 随机延迟，避免被检测为脚本
+            delay = random.uniform(min_delay, max_delay)
+            await asyncio.sleep(delay)
+            
+            # 发送口令
             try:
-                await bot.send_message(chat_id, f"✅ 已发送口令: {keyword}")
-            except Exception:
-                pass
-    except Exception as e:
-        logs.error(f"[LuckyDraw] 发送口令失败: {e}")
+                await bot.send_message(chat_id, keyword)
+                # 标记口令已发送
+                config.mark_keyword_sent(chat_id, keyword)
+                config.increment_joined()
+                
+                log_msg = (
+                    f"[LuckyDraw] 成功参与抽奖 | "
+                    f"群组: {chat_id} | "
+                    f"类型: {keyword_type} | "
+                    f"口令: {keyword} | "
+                    f"等待人数: {pending['wait_count']} | "
+                    f"延迟: {delay:.2f}s"
+                )
+                logs.info(log_msg)
+                
+                if is_test:
+                    try:
+                        await bot.send_message(chat_id, f"✅ 已发送口令: {keyword}")
+                    except Exception:
+                        pass
+            except Exception as e:
+                logs.error(f"[LuckyDraw] 发送口令失败: {e}")
+            
+            # 从队列中移除（安全删除，避免 KeyError）
+            if queue_key in pending_draws:
+                del pending_draws[queue_key]
