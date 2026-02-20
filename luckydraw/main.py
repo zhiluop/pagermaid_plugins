@@ -854,7 +854,16 @@ async def luckydraw_handler(message: Message, bot: Client):
 
     # ========== 机器人ID检测 ==========
     # 只处理白名单中机器人发布的抽奖消息
-    sender_id = getattr(message, "sender_id", None)
+    
+    # 获取发送者ID（参考 userinfo 插件）
+    sender_id = None
+    
+    # 判断是否是频道/群组发言（皮套）
+    if hasattr(message, 'sender_chat') and message.sender_chat:
+        sender_id = message.sender_chat.id
+    # 普通用户/机器人发言
+    elif hasattr(message, 'from_user') and message.from_user:
+        sender_id = message.from_user.id
     
     # 检查是否是转发的消息（转发消息需要检查原始发送者）
     forward_from = getattr(message, "forward_from", None)
@@ -868,6 +877,11 @@ async def luckydraw_handler(message: Message, bot: Client):
     elif forward_from_chat:
         # 转发自频道/群组
         actual_sender_id = getattr(forward_from_chat, "id", sender_id)
+    
+    if is_test:
+        logs.info(f"[LuckyDraw] sender_chat: {getattr(message, 'sender_chat', None)}")
+        logs.info(f"[LuckyDraw] from_user: {getattr(message, 'from_user', None)}")
+        logs.info(f"[LuckyDraw] sender_id: {sender_id}, actual_sender_id: {actual_sender_id}")
     
     # 检查发送者是否在白名单中
     if not config.is_bot_allowed(actual_sender_id):
