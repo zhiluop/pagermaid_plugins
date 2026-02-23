@@ -1,0 +1,176 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1771220906297,
+  "projectRoot": "/Users/shka/Documents/github/tegbot_plugin",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "scripts"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "ais": {
+      "path": "ais",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1771220906287,
+      "keyFiles": [
+        "DES.md",
+        "main.py"
+      ]
+    },
+    "cai": {
+      "path": "cai",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1771220906287,
+      "keyFiles": [
+        "DES.md",
+        "main.py"
+      ]
+    },
+    "debug": {
+      "path": "debug",
+      "purpose": null,
+      "fileCount": 10,
+      "lastAccessed": 1771220906287,
+      "keyFiles": [
+        "ais.py",
+        "cai.py",
+        "get_reactions.py",
+        "jpm.py",
+        "jpmai.py"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 4,
+      "lastAccessed": 1771220906288,
+      "keyFiles": [
+        "CLIProxyAPI_使用文档.md",
+        "OpenCode配置指南.md",
+        "VPS_DEPLOYMENT.md",
+        "check_cliproxy.py"
+      ]
+    },
+    "get_reactions": {
+      "path": "get_reactions",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1771220906289,
+      "keyFiles": [
+        "DES.md",
+        "main.py"
+      ]
+    },
+    "jpm": {
+      "path": "jpm",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1771220906290,
+      "keyFiles": [
+        "DES.md",
+        "main.py"
+      ]
+    },
+    "jpmai": {
+      "path": "jpmai",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1771220906290,
+      "keyFiles": [
+        "DES.md",
+        "main.py"
+      ]
+    },
+    "mcp_client": {
+      "path": "mcp_client",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1771220906290,
+      "keyFiles": [
+        "__init__.py",
+        "client.py",
+        "config.py",
+        "registry.py"
+      ]
+    },
+    "sar": {
+      "path": "sar",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1771220906290,
+      "keyFiles": [
+        "DES.md",
+        "main.py"
+      ]
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 1,
+      "lastAccessed": 1771220906291,
+      "keyFiles": [
+        "update_list.py"
+      ]
+    },
+    "sfl": {
+      "path": "sfl",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1771220906291,
+      "keyFiles": [
+        "DES.md",
+        "main.py"
+      ]
+    },
+    "share_plugins": {
+      "path": "share_plugins",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1771220906291,
+      "keyFiles": [
+        "DES.md",
+        "main.py"
+      ]
+    },
+    "userinfo": {
+      "path": "userinfo",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1771220906291,
+      "keyFiles": [
+        "main.py"
+      ]
+    }
+  },
+  "hotPaths": [],
+  "userDirectives": []
+}

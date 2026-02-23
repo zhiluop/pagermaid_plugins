@@ -1,5 +1,9 @@
 """
 AI 查询插件 - 向AI模型提问并返回回复
+
+支持：
+- OpenAI 格式的 API 调用
+- MCP（Model Context Protocol）工具集成（可选）
 """
 
 import asyncio
@@ -13,10 +17,24 @@ from pagermaid.listener import listener
 from pagermaid.enums import Message
 from pagermaid.utils import logs
 
+# 尝试导入 MCP 客户端（可选依赖）
+try:
+    from mcp_client import MCPClient, ConfigManager
+    HAS_MCP = True
+except ImportError:
+    HAS_MCP = False
+    MCPClient = None
+    ConfigManager = None
+
 # 数据目录和配置文件路径
 DATA_DIR = Path("ai_query")
 DATA_FILE = DATA_DIR / "config.json"
 PENDING_SELECTION = {}  # 待选择的模型列表消息
+
+# MCP 相关
+if HAS_MCP:
+    mcp_client: Optional[MCPClient] = None
+    mcp_config_manager: Optional[ConfigManager] = None
 
 
 def load_config() -> dict:
@@ -113,32 +131,38 @@ async def ais_query(message: Message):
 
     # 检查是否是帮助命令
     if text.strip().lower() == "help":
-        help_text = """🤖 AI 查询插件帮助
+        mcp_status = "✅ 已启用" if HAS_MCP else "⚪ 未安装"
 
-📝 命令格式：
+        help_text = f"""🤖 AI 查询插件帮助
+
+📝 基础命令：
   ,ais <文本>              - 向AI提问
   ,ais help                - 显示此帮助
-  ,ais set <api_url> <api_key>  - 设置API基础配置
-  ,ais models              - 查看/切换模型
-  ,ais model add <model_name>   - 添加新模型
-  ,ais model del <model_name>   - 删除模型
 
-⚙️ 配置说明：
-  使用 ,ais set 命令配置API基础信息：
-  • api_url: AI服务的API地址
-  • api_key: API访问密钥
+⚙️ API 配置：
+  ,ais set <api_url> <api_key>  - 设置API基础配置
+
+🤖 模型管理：
+  ,ais models              - 查看/切换模型
+  ,ais model add <名称>    - 添加新模型
+  ,ais model del <名称>    - 删除模型
+
+{'🔌 MCP 管理：' if HAS_MCP else ''}
+{'  ,ais mcp list          - 列出所有MCP服务器' if HAS_MCP else ''}
+{'  ,ais mcp add-raw <名称> <JSON>  - 添加MCP服务器（推荐，直接粘贴JSON）' if HAS_MCP else ''}
+{'  ,ais mcp add <名称> <命令> [参数]  - 添加MCP服务器（简单）' if HAS_MCP else ''}
+{'  ,ais mcp add-json <名称>  - 添加MCP服务器（回复方式）' if HAS_MCP else ''}
+{'  ,ais mcp remove <名称>  - 删除MCP服务器' if HAS_MCP else ''}
+{'  ,ais mcp enable <名称>  - 启用MCP服务器' if HAS_MCP else ''}
+{'  ,ais mcp disable <名称> - 禁用MCP服务器' if HAS_MCP else ''}
+{'  ,ais mcp tools         - 列出所有可用工具' if HAS_MCP else ''}
+
+📌 MCP 状态：{mcp_status}
 
 💡 使用示例：
   ,ais 今天天气怎么样
-  ,ais 如何学习Python编程
   ,ais set https://api.openai.com/v1/chat/completions sk-xxx
-  ,ais model add gpt-3.5-turbo
-  ,ais models
-
-📌 注意：
-  • 首次使用前需要先配置API
-  • 支持OpenAI格式的API
-  • 使用 ,ais models 可通过序号选择模型"""
+  ,ais model add gpt-3.5-turbo"""
         await message.edit(help_text)
         return
 
@@ -310,6 +334,11 @@ async def ais_query(message: Message):
             await message.delete()
             return
 
+    # 检查是否是 MCP 子命令
+    if HAS_MCP and text.strip().lower().startswith("mcp"):
+        await handle_mcp_command(message, text.strip())
+        return
+
     # 检查是否是配置命令
     if text.strip().lower().startswith("set"):
         # 提取配置参数
@@ -378,27 +407,46 @@ async def ais_query(message: Message):
         await message.delete()
         return
 
-    # 调用AI API
+    # 调用AI API（优先尝试 MCP，如果可用）
     current_model = get_current_model(config)
-    await message.edit(f"🤖 正在向AI提问...\n\n问题: {text}\n\n模型: {current_model}")
 
-    result = await call_ai_api(
-        api_url=config["api_url"],
-        api_key=config["api_key"],
-        model=current_model,
-        prompt=text,
-    )
+    # 尝试使用 MCP 增强查询（如果可用）
+    mcp_result = None
+    if HAS_MCP:
+        try:
+            client = get_mcp_client()
+            if client and client.is_ready:
+                await message.edit(
+                    f"🔌 正在通过 MCP 处理...\n\n问题: {text}"
+                )
+                mcp_result = await client.smart_call(text)
+        except Exception as e:
+            logs.warning(f"MCP 调用失败，降级到 API: {e}")
+            mcp_result = None
 
-    # 显示结果
-    if (
-        result
-        and not result.startswith("API调用失败")
-        and not result.startswith("调用异常")
-        and not result == "请求超时"
-    ):
-        await message.edit(f"🤖 AI 回复（{current_model}）：\n\n{result}")
+    # 如果 MCP 不可用或调用失败，使用原有 API
+    if mcp_result:
+        await message.edit(f"🔌 MCP 回复:\n\n{mcp_result}")
     else:
-        await message.edit("❌ AI回复获取失败，请检查配置或网络连接")
+        await message.edit(f"🤖 正在向AI提问...\n\n问题: {text}\n\n模型: {current_model}")
+
+        result = await call_ai_api(
+            api_url=config["api_url"],
+            api_key=config["api_key"],
+            model=current_model,
+            prompt=text,
+        )
+
+        # 显示结果
+        if (
+            result
+            and not result.startswith("API调用失败")
+            and not result.startswith("调用异常")
+            and not result == "请求超时"
+        ):
+            await message.edit(f"🤖 AI 回复（{current_model}）：\n\n{result}")
+        else:
+            await message.edit("❌ AI回复获取失败，请检查配置或网络连接")
 
 
 @listener(incoming=True, outgoing=True)
@@ -460,4 +508,575 @@ async def model_selection_handler(message: Message):
 
     # 清理待选择状态
     del PENDING_SELECTION[chat_id]
+    await message.delete()
+
+
+# ============================================================================
+# MCP 配置管理函数
+# ============================================================================
+
+def get_mcp_client() -> Optional[MCPClient]:
+    """获取或创建 MCP 客户端实例"""
+    global mcp_client, mcp_config_manager
+
+    if not HAS_MCP:
+        return None
+
+    if mcp_client is None:
+        mcp_config_manager = ConfigManager()
+        mcp_client = MCPClient()
+
+    return mcp_client
+
+
+async def handle_mcp_command(message: Message, text: str):
+    """处理 MCP 配置命令"""
+    parts = text.split()
+    action = parts[1].lower() if len(parts) > 1 else ""
+
+    if action == "list":
+        await mcp_list_servers(message)
+    elif action == "add":
+        await mcp_add_server(message, parts)
+    elif action == "add-json":
+        await mcp_add_server_json(message)
+    elif action == "add-raw":
+        # 新增：直接在命令后面粘贴 JSON
+        await mcp_add_server_raw(message, text)
+    elif action == "remove" or action == "rm" or action == "del":
+        await mcp_remove_server(message, parts)
+    elif action == "enable":
+        await mcp_enable_server(message, parts)
+    elif action == "disable":
+        await mcp_disable_server(message, parts)
+    elif action == "tools":
+        await mcp_list_tools(message)
+    elif action == "reload":
+        await mcp_reload(message)
+    elif action == "import":
+        await mcp_import_config(message, parts)
+    else:
+        await mcp_show_help(message)
+
+
+async def mcp_show_help(message: Message):
+    """显示 MCP 帮助信息"""
+    help_text = """🔌 MCP 配置管理
+
+📝 可用命令：
+  ,ais mcp list              - 列出所有MCP服务器
+  ,ais mcp add-raw <名称> <JSON>  - 添加MCP服务器（推荐）
+  ,ais mcp add <名称> <命令> [参数]  - 添加MCP服务器（简单）
+  ,ais mcp add-json <名称>   - 添加MCP服务器（回复方式）
+  ,ais mcp remove <名称>      - 删除MCP服务器
+  ,ais mcp enable <名称>      - 启用MCP服务器
+  ,ais mcp disable <名称>     - 禁用MCP服务器
+  ,ais mcp tools             - 列出所有可用工具
+  ,ais mcp reload            - 重新加载MCP配置
+  ,ais mcp import <路径>     - 从文件导入配置
+
+💡 配置示例：
+  # 推荐方式（一条消息完成，支持环境变量）
+  ,ais mcp add-raw minimax {"command":"uvx","args":["minimax-coding-plan-mcp","-y"],"env":{...}}
+
+  # 简单方式（无环境变量）
+  ,ais mcp add fs npx -y @modelcontextprotocol/server-filesystem /path
+
+📌 配置文件：ais/mcp_config.json"""
+    await message.edit(help_text)
+
+
+async def mcp_list_servers(message: Message):
+    """列出所有 MCP 服务器"""
+    client = get_mcp_client()
+    if not client:
+        await message.edit("❌ MCP 模块未安装")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    config_manager = client.config_manager
+    servers = config_manager.list_servers()
+
+    if not servers:
+        await message.edit(
+            "📋 MCP 服务器列表\n\n"
+            "暂未配置任何MCP服务器\n\n"
+            "使用 ,ais mcp add 添加服务器"
+        )
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    # 构建服务器列表
+    lines = ["📋 MCP 服务器列表\n\n"]
+    for server in servers:
+        status = "✅" if server["enabled"] else "⏸️"
+        default = " (默认)" if server["is_default"] else ""
+        type_emoji = {"stdio": "💻", "SSE": "🌐", "module": "📦"}.get(server["type"], "❓")
+
+        lines.append(
+            f"{status} **{server['name']}** {default}\n"
+            f"   {type_emoji} 类型: {server['type']}"
+        )
+
+        # 显示配置详情（隐藏敏感信息）
+        config = server["config"]
+        if "command" in config:
+            cmd = config["command"]
+            args = " ".join(config.get("args", []))
+            # 截断过长的命令
+            if len(args) > 40:
+                args = args[:37] + "..."
+            lines.append(f"   命令: {cmd} {args}")
+        elif "url" in config:
+            url = config["url"]
+            lines.append(f"   URL: {url}")
+
+        lines.append("")
+
+    await message.edit("\n".join(lines))
+
+
+async def mcp_add_server(message: Message, parts: list):
+    """添加 MCP 服务器"""
+    if len(parts) < 4:
+        await message.edit(
+            "❌ 参数不足\n\n"
+            "格式: ,ais mcp add <名称> <命令> [参数]\n\n"
+            "示例:\n"
+            "  ,ais mcp add fs npx -y @modelcontextprotocol/server-filesystem /path\n"
+            "  ,ais mcp add search npx -y @modelcontextprotocol/server-brave-search\n\n"
+            "如需设置环境变量，请使用:\n"
+            "  ,ais mcp add-json <名称> <JSON配置>"
+        )
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    client = get_mcp_client()
+    if not client:
+        await message.edit("❌ MCP 模块未安装")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    name = parts[2]
+    command = parts[3]
+    args = parts[4:] if len(parts) > 4 else []
+
+    # 检查是否是 URL 方式
+    if command == "--url" and args:
+        config = {"url": args[0], "enabled": True}
+    else:
+        config = {
+            "command": command,
+            "args": args,
+            "enabled": True
+        }
+
+    config_manager = client.config_manager
+    if config_manager.add_server(name, config):
+        await message.edit(
+            f"✅ 成功添加 MCP 服务器: {name}\n\n"
+            f"命令: {command} {' '.join(args)}\n\n"
+            f"使用 ,ais mcp list 查看所有服务器\n"
+            f"使用 ,ais mcp tools 查看可用工具"
+        )
+    else:
+        await message.edit("❌ 添加失败")
+
+    await asyncio.sleep(3)
+    await message.delete()
+
+
+async def mcp_add_server_json(message: Message):
+    """通过 JSON 添加 MCP 服务器（支持环境变量）"""
+    # 检查是否回复了消息
+    if not message.reply_to_message:
+        await message.edit(
+            "❌ 请回复包含 JSON 配置的消息\n\n"
+            "格式: ,ais mcp add-json <名称>\n\n"
+            "然后回复此消息，粘贴 JSON 配置:\n"
+            "{\n"
+            '  "command": "uvx",\n'
+            '  "args": ["minimax-coding-plan-mcp", "-y"],\n'
+            '  "env": {"KEY": "value"}\n'
+            "}"
+        )
+        await asyncio.sleep(5)
+        await message.delete()
+        return
+
+    # 检查回复的消息是否有文本内容
+    reply_text = message.reply_to_message.text or ""
+    if not reply_text.strip():
+        await message.edit(
+            "❌ 回复的消息不包含文本\n\n"
+            "请回复包含 JSON 配置的文本消息"
+        )
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    client = get_mcp_client()
+    if not client:
+        await message.edit("❌ MCP 模块未安装")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    # 获取名称
+    parts = message.text.split()
+    if len(parts) < 3:
+        await message.edit("❌ 请指定服务器名称\n\n格式: ,ais mcp add-json <名称>")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    name = parts[2]
+
+    # 解析 JSON
+    try:
+        json_text = reply_text
+        # 提取 JSON（如果消息中有其他文本）
+        import re
+        json_match = re.search(r'\{[\s\S]*\}', json_text)
+        if json_match:
+            json_text = json_match.group(0)
+
+        config = json.loads(json_text)
+    except json.JSONDecodeError as e:
+        await message.edit(f"❌ JSON 解析失败: {str(e)}\n\n请检查 JSON 格式是否正确")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+    except Exception as e:
+        await message.edit(f"❌ 读取失败: {str(e)}")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    # 验证必要字段
+    if "command" not in config and "url" not in config:
+        await message.edit("❌ 配置必须包含 command 或 url 字段")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    # 添加 enabled 标记
+    config["enabled"] = True
+
+    # 保存配置
+    config_manager = client.config_manager
+    if config_manager.add_server(name, config):
+        # 统计配置内容
+        info_parts = []
+        if "command" in config:
+            info_parts.append(f"命令: {config['command']} {' '.join(config.get('args', []))}")
+        if "url" in config:
+            info_parts.append(f"URL: {config['url']}")
+        if "env" in config:
+            env_count = len(config["env"])
+            info_parts.append(f"环境变量: {env_count} 个")
+
+        await message.edit(
+            f"✅ 成功添加 MCP 服务器: {name}\n\n"
+            + "\n".join(info_parts)
+            + f"\n\n使用 ,ais mcp list 查看所有服务器"
+        )
+    else:
+        await message.edit("❌ 添加失败")
+
+    await asyncio.sleep(3)
+    await message.delete()
+
+
+async def mcp_add_server_raw(message: Message, text: str):
+    """直接在命令后面粘贴 JSON（最简单的方式）"""
+    # 获取名称
+    parts = text.split()
+    if len(parts) < 3:
+        await message.edit(
+            "❌ 格式错误\n\n"
+            "正确格式: ,ais mcp add-raw <名称> <JSON>\n\n"
+            "示例:\n"
+            ",ais mcp add-raw minimax {\"command\":\"uvx\",\"args\":[\"minimax-coding-plan-mcp\",\"-y\"],\"env\":{...}}"
+        )
+        await asyncio.sleep(5)
+        await message.delete()
+        return
+
+    name = parts[2]
+
+    # 提取 JSON（从名称后开始）
+    import re
+    # 查找第一个 { 及其之后的所有内容
+    json_match = re.search(r'\{[\s\S]*\}', text)
+    if not json_match:
+        await message.edit(
+            "❌ 未找到 JSON 配置\n\n"
+            "请在命令后粘贴完整的 JSON 配置"
+        )
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    json_text = json_match.group(0)
+
+    # 解析 JSON
+    try:
+        config = json.loads(json_text)
+    except json.JSONDecodeError as e:
+        await message.edit(f"❌ JSON 解析失败: {str(e)}\n\n请检查 JSON 格式是否正确")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    # 验证必要字段
+    if "command" not in config and "url" not in config:
+        await message.edit("❌ 配置必须包含 command 或 url 字段")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    client = get_mcp_client()
+    if not client:
+        await message.edit("❌ MCP 模块未安装")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    # 添加 enabled 标记
+    config["enabled"] = True
+
+    # 保存配置
+    config_manager = client.config_manager
+    if config_manager.add_server(name, config):
+        # 统计配置内容
+        info_parts = []
+        if "command" in config:
+            info_parts.append(f"命令: {config['command']} {' '.join(config.get('args', []))}")
+        if "url" in config:
+            info_parts.append(f"URL: {config['url']}")
+        if "env" in config:
+            env_count = len(config["env"])
+            info_parts.append(f"环境变量: {env_count} 个")
+
+        await message.edit(
+            f"✅ 成功添加 MCP 服务器: {name}\n\n"
+            + "\n".join(info_parts)
+            + f"\n\n使用 ,ais mcp list 查看所有服务器"
+        )
+    else:
+        await message.edit("❌ 添加失败")
+
+    await asyncio.sleep(3)
+    await message.delete()
+
+
+async def mcp_remove_server(message: Message, parts: list):
+    """删除 MCP 服务器"""
+    if len(parts) < 3:
+        await message.edit(
+            "❌ 请指定要删除的服务器名称\n\n"
+            "格式: ,ais mcp remove <名称>"
+        )
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    client = get_mcp_client()
+    if not client:
+        await message.edit("❌ MCP 模块未安装")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    name = parts[2]
+    config_manager = client.config_manager
+
+    if not config_manager.get_server(name):
+        await message.edit(f"⚠️ 服务器 '{name}' 不存在")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    if config_manager.remove_server(name):
+        await message.edit(f"✅ 已删除 MCP 服务器: {name}")
+    else:
+        await message.edit("❌ 删除失败")
+
+    await asyncio.sleep(3)
+    await message.delete()
+
+
+async def mcp_enable_server(message: Message, parts: list):
+    """启用 MCP 服务器"""
+    if len(parts) < 3:
+        await message.edit(
+            "❌ 请指定要启用的服务器名称\n\n"
+            "格式: ,ais mcp enable <名称>"
+        )
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    client = get_mcp_client()
+    if not client:
+        await message.edit("❌ MCP 模块未安装")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    name = parts[2]
+    config_manager = client.config_manager
+
+    if config_manager.enable_server(name):
+        await message.edit(f"✅ 已启用 MCP 服务器: {name}")
+    else:
+        await message.edit(f"⚠️ 服务器 '{name}' 不存在")
+
+    await asyncio.sleep(3)
+    await message.delete()
+
+
+async def mcp_disable_server(message: Message, parts: list):
+    """禁用 MCP 服务器"""
+    if len(parts) < 3:
+        await message.edit(
+            "❌ 请指定要禁用的服务器名称\n\n"
+            "格式: ,ais mcp disable <名称>"
+        )
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    client = get_mcp_client()
+    if not client:
+        await message.edit("❌ MCP 模块未安装")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    name = parts[2]
+    config_manager = client.config_manager
+
+    if config_manager.disable_server(name):
+        await message.edit(f"✅ 已禁用 MCP 服务器: {name}")
+    else:
+        await message.edit(f"⚠️ 服务器 '{name}' 不存在")
+
+    await asyncio.sleep(3)
+    await message.delete()
+
+
+async def mcp_list_tools(message: Message):
+    """列出所有可用工具"""
+    client = get_mcp_client()
+    if not client:
+        await message.edit("❌ MCP 模块未安装")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    # 确保客户端已初始化
+    await client.wait_ready(timeout=10)
+
+    tools = client.list_tools(group_by_mcp=True)
+
+    if not tools:
+        await message.edit(
+            "🔧 MCP 工具列表\n\n"
+            "暂无可用工具\n\n"
+            "请先添加并启用 MCP 服务器"
+        )
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    # 构建工具列表
+    lines = ["🔧 MCP 工具列表\n\n"]
+
+    for group in tools:
+        mcp_name = group["mcp_server"]
+        tool_count = group["tool_count"]
+        lines.append(f"📦 **{mcp_name}** ({tool_count} 个工具)")
+
+        for tool in group["tools"][:10]:  # 每个 MCP 最多显示 10 个
+            lines.append(f"  • {tool['name']}: {tool['description'][:50]}...")
+
+        if tool_count > 10:
+            lines.append(f"  ... 还有 {tool_count - 10} 个工具")
+
+        lines.append("")
+
+    await message.edit("\n".join(lines))
+
+
+async def mcp_reload(message: Message):
+    """重新加载 MCP 配置"""
+    client = get_mcp_client()
+    if not client:
+        await message.edit("❌ MCP 模块未安装")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    await message.edit("🔄 正在重新加载 MCP 配置...")
+
+    success = await client.reload()
+
+    if success:
+        await message.edit("✅ MCP 配置已重新加载")
+    else:
+        await message.edit("⚠️ 未配置任何 MCP 服务器")
+
+    await asyncio.sleep(3)
+    await message.delete()
+
+
+async def mcp_import_config(message: Message, parts: list):
+    """从文件导入 MCP 配置"""
+    if len(parts) < 3:
+        await message.edit(
+            "❌ 请指定配置文件路径\n\n"
+            "格式: ,ais mcp import <文件路径>\n\n"
+            "支持 VSCode/Claude Desktop 的 claude_desktop_config.json 格式"
+        )
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    client = get_mcp_client()
+    if not client:
+        await message.edit("❌ MCP 模块未安装")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    config_path = Path(parts[2])
+
+    if not config_path.exists():
+        await message.edit(f"⚠️ 文件不存在: {parts[2]}")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    try:
+        imported = client.config_manager.import_from_vscode_config(config_path)
+
+        if imported:
+            await message.edit(
+                f"✅ 成功导入 {len(imported)} 个 MCP 服务器:\n\n"
+                + "\n".join([f"  • {name}" for name in imported])
+                + f"\n\n使用 ,ais mcp list 查看详情"
+            )
+        else:
+            await message.edit("⚠️ 配置文件中未找到 MCP 服务器")
+
+    except Exception as e:
+        await message.edit(f"❌ 导入失败: {str(e)}")
+
+    await asyncio.sleep(5)
     await message.delete()

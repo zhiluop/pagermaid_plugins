@@ -38,16 +38,12 @@ class SARConfig:
                     self.enabled_chats = set(data.get("enabled_chats", []))
                     self.my_user_id = data.get("my_user_id")
                     self.stats = data.get("stats", {"total_replied": 0})
-                logs.info(
-                    f"[SAR] 配置已加载，已启用 {len(self.enabled_chats)} 个群组"
-                )
             except Exception as e:
                 logs.error(f"[SAR] 加载配置失败: {e}")
                 self.enabled_chats = set()
                 self.my_user_id = None
                 self.stats = {"total_replied": 0}
         else:
-            logs.info("[SAR] 配置文件不存在，使用默认配置")
             self.save()
 
     def save(self) -> bool:
@@ -122,13 +118,13 @@ config = SARConfig()
 @Hook.on_startup()
 async def sar_startup():
     """插件启动时执行"""
-    logs.info("[SAR] 贴纸自动回复插件已加载")
+    pass
 
 
 @Hook.on_shutdown()
 async def sar_shutdown():
     """插件关闭时执行"""
-    logs.info("[SAR] 贴纸自动回复插件已卸载")
+    pass
 
 
 # ==================== 管理命令 ====================
@@ -312,21 +308,11 @@ async def sticker_auto_reply_handler(message: Message, bot: Client):
         # 获取贴纸文件ID
         sticker_file_id = message.sticker.file_id
 
-        # 回复相同的贴纸
-        await replied_message.reply(sticker=sticker_file_id)
+        # 回复相同的贴纸（回复原贴纸消息）
+        await message.reply_sticker(sticker_file_id)
 
         # 更新统计
         config.increment_stats()
-
-        # 获取用户信息用于日志
-        user_name = (
-            message.from_user.username
-            or message.from_user.first_name
-            or str(message.from_user.id)
-        )
-        logs.info(
-            f"[SAR] 已回复用户 {user_name}({message.from_user.id}) 在群组 {message.chat.id} 的贴纸"
-        )
 
     except Exception as e:
         logs.error(f"[SAR] 贴纸回复失败: {e}")

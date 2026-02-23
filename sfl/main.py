@@ -25,13 +25,13 @@ config_file = plugin_dir / "sfl_config.json"
 @Hook.on_startup()
 async def plugin_startup():
     """插件初始化"""
-    logs.info("贴纸跟随插件已加载")
+    pass
 
 
 @Hook.on_shutdown()
 async def plugin_shutdown():
     """插件关闭"""
-    logs.info("贴纸跟随插件已卸载")
+    pass
 
 
 class StickerFollowManager:
@@ -48,9 +48,8 @@ class StickerFollowManager:
                 with open(config_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.chats = data.get("chats", {})
-                logs.info(f"贴纸跟随配置已加载，共 {len(self.chats)} 个群组")
             except Exception as e:
-                logs.error(f"加载贴纸跟随配置失败: {e}")
+                logs.error(f"[SFL] 加载配置失败: {e}")
                 self.chats = {}
         else:
             self.chats = {}
@@ -60,10 +59,9 @@ class StickerFollowManager:
         try:
             with open(config_file, "w", encoding="utf-8") as f:
                 json.dump({"chats": self.chats}, f, indent=4, ensure_ascii=False)
-            logs.info("贴纸跟随配置已保存")
             return True
         except Exception as e:
-            logs.error(f"保存贴纸跟随配置失败: {e}")
+            logs.error(f"[SFL] 保存配置失败: {e}")
             return False
 
     def enable_chat(self, chat_id: str, chat_title: str) -> str:
@@ -247,8 +245,6 @@ async def set_sticker(message: Message):
     file_id = reply_msg.sticker.file_id
     file_unique_id = reply_msg.sticker.file_unique_id
 
-    logs.info(f"[贴纸跟随] 设置贴纸 - file_id: {file_id}, file_unique_id: {file_unique_id}")
-
     # 检查群组是否已配置
     if chat_id not in manager.chats:
         await message.edit(
@@ -272,57 +268,43 @@ async def list_chats(message: Message):
     await message.delete()
 
 
-@listener(is_plugin=True, incoming=True, outgoing=True, ignore_edited=True)
+@listener(is_plugin=True, incoming=True, outgoing=False, ignore_edited=True)
 async def sticker_follow_trigger(message: Message, bot: Client):
     """监听贴纸消息并自动跟随"""
     # 只处理贴纸消息
     if not message.sticker:
         return
 
-    logs.info(f"[贴纸跟随] 检测到贴纸消息")
-
     # 只在群组中处理
     if not message.chat or message.chat.id >= 0:
-        logs.info(f"[贴纸跟随] 忽略非群组消息")
         return
 
     chat_id = str(message.chat.id)
     file_id = message.sticker.file_id
     file_unique_id = message.sticker.file_unique_id
 
-    logs.info(f"[贴纸跟随] 群组ID: {chat_id}, file_id: {file_id}, file_unique_id: {file_unique_id}")
-
     # 获取群组配置
     config = manager.get_chat_config(chat_id)
     if not config:
-        logs.info(f"[贴纸跟随] 群组 {chat_id} 未配置")
         return
 
     # 检查是否开启
     if not config.get("enabled"):
-        logs.info(f"[贴纸跟随] 群组 {chat_id} 功能未开启")
         return
 
     # 检查是否是设置的贴纸（使用 file_unique_id 进行匹配）
     target_file_unique_id = config.get("file_unique_id")
     target_file_id = config.get("file_id")
 
-    logs.info(f"[贴纸跟随] 目标 file_unique_id: {target_file_unique_id}, file_id: {target_file_id}")
-
     if not target_file_unique_id:
-        logs.info(f"[贴纸跟随] 群组 {chat_id} 未设置贴纸")
         return
 
     # 优先使用 file_unique_id 匹配
     if file_unique_id != target_file_unique_id:
-        logs.info(f"[贴纸跟随] 贴纸不匹配: {file_unique_id} != {target_file_unique_id}")
         return
-
-    logs.info(f"[贴纸跟随] 贴纸匹配成功！准备发送...")
 
     # 发送同一个贴纸（使用 file_id）
     try:
         await message.reply_sticker(target_file_id)
-        logs.info(f"[贴纸跟随] 在群组 {config['chat_title']} 中跟随发送了贴纸")
     except Exception as e:
-        logs.error(f"[贴纸跟随] 发送贴纸失败: {e}")
+        logs.error(f"[SFL] 发送贴纸失败: {e}")

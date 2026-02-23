@@ -1,5 +1,13 @@
 # -*- coding: utf-8 -*-
 # 插件名称: luckydraw
+# 生成时间: 2026-02-22 14:26:56
+
+# -*- coding: utf-8 -*-
+# 插件名称: luckydraw
+# 生成时间: 2026-02-21 14:59:08
+
+# -*- coding: utf-8 -*-
+# 插件名称: luckydraw
 # 生成时间: 2026-02-16 17:00
 
 """
@@ -388,12 +396,16 @@ class KeywordExtractor:
         (r"领取密令[：:]\s*(.+?)(?:\n|$)", "密令抽奖"),
         # 格式2: 参与关键词：「xxx」 或 参与关键词：xxx
         (r"参与关键词[：:]\s*[「「\"]?(.+?)[」」\"]?(?:\n|$)", "参与关键词"),
-        # 格式3: 发送 xxx 进行领取 / 发送 xxx 领取 / 发送下方口令领取：xxx
+        # 格式3: 发送 xxx 进行领取（口令在中间，优先级最高）
+        (r"发送\s+(.+?)\s+进行领取", "红包口令-进行领取"),
+        # 格式3.5: 发送 xxx 领取 / 发送下方口令领取：xxx（口令在领取之后）
         (r"发送.+(?:领取)[：:]?\s*(.+?)(?:\n|$)", "红包口令"),
         # 格式4: 输入口令: xxx / 口令: xxx
         (r"(?:输入)?口令[：:]\s*(.+?)(?:\n|$)", "口令"),
         # 格式5: 回复 xxx 领取 / 回复 xxx 参与
         (r"回复\s+(.+?)\s+(?:领取|参与)", "回复口令"),
+        # 格式6: 【拼手气红包】xxx (红包ID)
+        (r"【拼手气红包】\s*([a-zA-Z0-9\-]+)(?:\s|$)", "拼手气红包"),
     ]
 
     @classmethod
@@ -820,7 +832,7 @@ async def list_delays(message: Message):
 # ==================== 自动抽奖监听器 ====================
 
 
-@listener(is_plugin=True, incoming=True, outgoing=False, ignore_edited=True)
+@listener(is_plugin=True, incoming=True, outgoing=False, ignore_edited=False)
 async def luckydraw_handler(message: Message, bot: Client):
     """
     自动抽奖消息处理器
@@ -969,6 +981,8 @@ async def luckydraw_handler(message: Message, bot: Client):
         "keyword": keyword,
         "keyword_type": keyword_type,
         "chat_id": chat_id,
+        "wait_count": 1,
+        "current_count": 0,
     }
     
     # 获取群组的延时配置
@@ -1014,7 +1028,7 @@ async def luckydraw_handler(message: Message, bot: Client):
 # ==================== 监听其他用户回复 ====================
 
 
-@listener(is_plugin=True, incoming=True, outgoing=False, ignore_edited=True)
+@listener(is_plugin=True, incoming=True, outgoing=False, ignore_edited=False)
 async def luckydraw_reply_handler(message: Message, bot: Client):
     """
     监听其他用户回复，触发口令发送
@@ -1050,11 +1064,19 @@ async def luckydraw_reply_handler(message: Message, bot: Client):
     for queue_key in list(pending_draws.keys()):
         if not queue_key.startswith(f"{chat_id}_"):
             continue
-            
+        
         pending = pending_draws[queue_key]
+        keyword = pending.get("keyword")
+        
+        # 检查口令是否已发送过，避免重复发送
+        if config.has_sent_keyword(chat_id, keyword):
+            if is_test:
+                logs.info(f"[LuckyDraw] 口令已发送过，跳过 | 口令: {keyword}")
+            # 从队列中移除
+            del pending_draws[queue_key]
+            continue
         
         # 增加当前回复计数
-        pending["current_count"] += 1
         
         if is_test:
             logs.info(f"[LuckyDraw] 用户回复，当前: {pending['current_count']}/{pending['wait_count']}")
