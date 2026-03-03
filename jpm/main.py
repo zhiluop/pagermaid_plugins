@@ -330,7 +330,7 @@ class JPMConfigManager:
                     indent=4,
                     ensure_ascii=False,
                 )
-            logs.info("JPM 配置已保存")
+            logs.debug("JPM 配置已保存")
             return True
         except Exception as e:
             logs.error(f"保存 JPM 配置失败: {e}")
