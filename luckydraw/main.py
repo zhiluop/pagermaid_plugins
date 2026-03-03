@@ -48,6 +48,25 @@ SCRIPT_DETECTION_KEYWORDS = [
     "作弊",
     "挂",
 ]
+# 自排除关键词（消息包含这些词时不参与抽奖，避免尴尬）
+SELF_EXCLUSION_KEYWORDS = [
+    "我是G",
+    "我是g",
+    "自ban",
+    "自ban人",
+    "我是自ban人",
+    "我是自ban",
+    "我是狗",
+    "我是畜生",
+    "我是猪",
+    "我是傻",
+    "我是sb",
+    "我是SB",
+    "我是傻逼",
+    "我是蠢",
+    "我是废物",
+    "我是垃圾",
+]
 
 # 抢红包随机延迟范围（秒）- 默认值
 DEFAULT_MIN_DELAY = 2.0
@@ -489,6 +508,10 @@ async def ldraw_command(message: Message):
         await disable_chat(message)
     elif cmd == "set":
         await set_chat(message)
+    elif cmd == "delayset":
+        await set_delay_by_chat_id(message)
+    elif cmd == "delayoff":
+        await remove_delay_by_chat_id(message)
     elif cmd == "delay":
         await set_delay(message)
     elif cmd == "listdelay":
@@ -532,6 +555,8 @@ async def show_help(message: Message):
 
 `,ldraw delay <延时>` - 设置当前群组延时
 `,ldraw delay <最小> <最大>` - 设置精确延时范围
+`,ldraw delayset <群组ID> <最小延时> [最大延时]` - 设置指定群组延时
+`,ldraw delayoff <群组ID>` - 移除指定群组延时
 `,ldraw listdelay` - 查看所有群组延时配置
 `,ldraw list` - 查看所有启用的群组
 `,ldraw stats` - 查看统计信息
@@ -829,6 +854,109 @@ async def list_delays(message: Message):
     await message.delete()
 
 
+async def set_delay_by_chat_id(message: Message) -> None:
+    """通过群组ID设置延时"""
+    params = message.arguments.split()
+
+    if len(params) < 3:
+        await message.edit(
+            "**参数错误！**\n\n"
+            "使用方法:\n"
+            "`,ldraw delayset <群组ID> <最小延时> [最大延时]`\n\n"
+            "示例:\n"
+            "`,ldraw delayset -1001234567890 0.5`\n"
+            "`,ldraw delayset -1001234567890 2 5`"
+        )
+        await asyncio.sleep(8)
+        await message.delete()
+        return
+
+    try:
+        chat_id = int(params[1])
+    except ValueError:
+        await message.edit("**群组ID格式错误！**\n\n请输入有效的数字ID")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    if chat_id >= 0:
+        await message.edit("**群组ID错误！**\n\n群组ID必须为负数")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    try:
+        min_delay = float(params[2])
+    except ValueError:
+        await message.edit("**参数错误！**\n\n最小延时必须为数字")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    max_delay: Optional[float] = None
+    if len(params) >= 4:
+        try:
+            max_delay = float(params[3])
+        except ValueError:
+            await message.edit("**参数错误！**\n\n最大延时必须为数字")
+            await asyncio.sleep(3)
+            await message.delete()
+            return
+
+    if min_delay < 0.1:
+        await message.edit("**参数错误！**\n\n最小延时不能小于 0.1 秒")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    if max_delay is not None and max_delay < min_delay:
+        await message.edit("**参数错误！**\n\n最大延时必须大于等于最小延时")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    result = config.set_chat_delay(chat_id, min_delay, max_delay)
+    await message.edit(f"**{result}**")
+    await asyncio.sleep(3)
+    await message.delete()
+
+
+async def remove_delay_by_chat_id(message: Message) -> None:
+    """通过群组ID移除延时"""
+    params = message.arguments.split()
+
+    if len(params) < 2:
+        await message.edit(
+            "**参数错误！**\n\n"
+            "使用方法:\n"
+            "`,ldraw delayoff <群组ID>`\n\n"
+            "示例:\n"
+            "`,ldraw delayoff -1001234567890`"
+        )
+        await asyncio.sleep(6)
+        await message.delete()
+        return
+
+    try:
+        chat_id = int(params[1])
+    except ValueError:
+        await message.edit("**群组ID格式错误！**\n\n请输入有效的数字ID")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    if chat_id >= 0:
+        await message.edit("**群组ID错误！**\n\n群组ID必须为负数")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    result = config.remove_chat_delay(chat_id)
+    await message.edit(f"**{result}**")
+    await asyncio.sleep(3)
+    await message.delete()
+
+
 # ==================== 自动抽奖监听器 ====================
 
 
@@ -920,6 +1048,15 @@ async def luckydraw_handler(message: Message, bot: Client):
         if is_test:
             logs.info(f"[LuckyDraw] 无法获取消息文本，跳过")
         return
+
+
+    # 检查消息是否包含自排除关键词，如果是则不参与抽奖
+    text_lower = text.lower()
+    for exclude_keyword in SELF_EXCLUSION_KEYWORDS:
+        if exclude_keyword in text_lower:
+            if is_test:
+                logs.info(f"[LuckyDraw] 检测到自排除关键词 '{exclude_keyword}'，跳过")
+            return
 
     # 检查是否红包已领完，如果是则清除该口令记录
     if check_red_packet_finished(text, chat_id, is_test):
