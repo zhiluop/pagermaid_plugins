@@ -1,6 +1,12 @@
 # Claude Code
 .claude/
 
+# OpenClaw memory cache
+.omc/
+
+# MCP client (unfinished)
+mcp_client/
+
 # Plugin config files (may contain sensitive data)
 *_config.json
 
