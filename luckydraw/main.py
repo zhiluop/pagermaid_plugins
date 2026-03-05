@@ -443,6 +443,9 @@ class KeywordExtractor:
                 # 清理口令中的引号和多余空格
                 keyword = keyword.strip('"\'「」【】')
                 if keyword and len(keyword) > 0:
+                    # 忽略以 / 开头的命令类关键词（如 /mysterybox）
+                    if keyword.startswith('/'):
+                        return None
                     return (keyword, keyword_type)
 
         return None
