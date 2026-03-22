@@ -22,6 +22,7 @@ import random
 import re
 from pathlib import Path
 from typing import Dict, Optional, Set, List
+from collections import defaultdict
 
 from pagermaid.listener import listener
 from pagermaid.hook import Hook
@@ -81,12 +82,22 @@ WAIT_USER_COUNT_MIN = 1
 WAIT_USER_COUNT_MAX = 2
 
 # 群组默认延时配置
-DEFAULT_DELAY = 2.0  # 秒
+# 注意：默认设为 0，转发别人话做抽奖时默认不加延时
+# 只有用户主动用 ldraw delay 命令设置后才加延时
+DEFAULT_DELAY = 0.0  # 秒
+
+# 红包个数阈值：小于此值直接发送关键词，大于等于此值用转发逻辑
+REDPACKET_COUNT_THRESHOLD = 5
 
 # 默认抽奖机器人ID白名单（首次使用时写入配置文件）
 DEFAULT_BOT_WHITELIST: Set[int] = {
     6461022460,  # 抽奖机器人
 }
+
+# ========== 性能优化：批量刷盘配置 ==========
+CONFIG_FLUSH_INTERVAL = 3.0  # 秒：多久强制刷盘一次
+CONFIG_FLUSH_MAX_PENDING = 50  # 积累多少条变更后立即刷盘
+# ==========================================
 
 
 class LuckyDrawConfig:
@@ -104,6 +115,16 @@ class LuckyDrawConfig:
             "total_joined": 0,    # 成功参与的次数
             "total_blocked": 0,   # 被安全检测拦截的次数
         }
+        
+        # ========== 性能优化：批量刷盘相关 ==========
+        self._pending_save: bool = False  # 是否有待刷新的变更
+        self._pending_keyword_changes: Dict[str, list] = {}  # 待刷新的口令变更
+        self._pending_message_changes: Set[str] = set()  # 待刷新的消息ID变更
+        self._pending_stats_changes: Dict[str, int] = {}  # 待刷新的统计变更
+        self._flush_task: Optional[asyncio.Task] = None  # 刷盘定时任务
+        self._change_count: int = 0  # 累计变更次数
+        # ==========================================
+        
         self.load()
 
     def load(self) -> None:
@@ -133,8 +154,63 @@ class LuckyDrawConfig:
             self.bot_whitelist = set(DEFAULT_BOT_WHITELIST)
             self.save()
 
-    def save(self) -> bool:
-        """保存配置到文件"""
+    def _schedule_flush(self) -> None:
+        """安排一次延迟刷盘（避免频繁写磁盘）"""
+        self._pending_save = True
+        self._change_count += 1
+        
+        # 如果变更太多，立即刷盘
+        if self._change_count >= CONFIG_FLUSH_MAX_PENDING:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._flush_to_disk())
+            except RuntimeError:
+                # 初始化阶段没有事件循环，同步写入
+                self._do_save()
+            return
+        
+        # 启动/重置定时刷盘任务
+        if self._flush_task is None or self._flush_task.done():
+            try:
+                loop = asyncio.get_running_loop()
+                self._flush_task = loop.create_task(self._flush_timer())
+            except RuntimeError:
+                pass  # 初始化阶段忽略，依赖下次主动保存
+    
+    async def _flush_timer(self) -> None:
+        """定时刷盘协程"""
+        await asyncio.sleep(CONFIG_FLUSH_INTERVAL)
+        await self._flush_to_disk()
+    
+    async def _flush_to_disk(self) -> None:
+        """将所有待刷新的变更写入磁盘"""
+        if not self._pending_save:
+            return
+        
+        # 合并变更
+        for key, value in self._pending_keyword_changes.items():
+            if key not in self.sent_keywords:
+                self.sent_keywords[key] = []
+            for v in value:
+                if v not in self.sent_keywords[key]:
+                    self.sent_keywords[key].append(v)
+        self._pending_keyword_changes = {}
+        
+        self.sent_messages.update(self._pending_message_changes)
+        self._pending_message_changes = set()
+        
+        for k, v in self._pending_stats_changes.items():
+            self.stats[k] = self.stats.get(k, 0) + v
+        self._pending_stats_changes = {}
+        
+        self._pending_save = False
+        self._change_count = 0
+        
+        # 实际写入磁盘
+        self._do_save()
+    
+    def _do_save(self) -> bool:
+        """实际执行磁盘写入（同步）"""
         try:
             with open(config_file, "w", encoding="utf-8") as f:
                 json.dump(
@@ -155,6 +231,11 @@ class LuckyDrawConfig:
         except Exception as e:
             logs.error(f"[LuckyDraw] 保存配置失败: {e}")
             return False
+
+    def save(self) -> bool:
+        """保存配置到文件（现在改为异步缓冲写入）"""
+        self._schedule_flush()
+        return True  # 返回成功，因为写入是异步的
 
     def add_chat(self, chat_id: int) -> str:
         """添加启用功能的群组"""
@@ -249,36 +330,40 @@ class LuckyDrawConfig:
     def mark_keyword_sent(self, chat_id: int, keyword: str) -> None:
         """标记口令已发送"""
         key = str(chat_id)
-        if key not in self.sent_keywords:
-            self.sent_keywords[key] = []
-        if keyword not in self.sent_keywords[key]:
-            self.sent_keywords[key].append(keyword)
-            self.save()
+        if key not in self._pending_keyword_changes:
+            self._pending_keyword_changes[key] = []
+        if keyword not in self._pending_keyword_changes[key]:
+            self._pending_keyword_changes[key].append(keyword)
+        self._schedule_flush()
 
     def is_message_processed(self, chat_id: int, message_id: int) -> bool:
         """检查消息是否已处理"""
         key = f"{chat_id}_{message_id}"
+        # 先检查待刷新的变更
+        if key in self._pending_message_changes:
+            return True
         return key in self.sent_messages
 
     def mark_message_processed(self, chat_id: int, message_id: int) -> None:
         """标记消息已处理"""
         key = f"{chat_id}_{message_id}"
-        self.sent_messages.add(key)
-        # 保持集合不要太大，限制1000条
-        if len(self.sent_messages) > 1000:
-            self.sent_messages = set(list(self.sent_messages)[-500:])
-        self.save()
+        self._pending_message_changes.add(key)
+        self._schedule_flush()
 
     def clear_sent_keywords(self, chat_id: int = None) -> str:
         """清除已发送口令记录"""
         if chat_id is None:
             self.sent_keywords = {}
+            self._pending_keyword_changes = {}
+            _processed_messages.clear()  # 清除所有进程内缓存
             self.save()
             return "已清除所有群组的口令记录"
         key = str(chat_id)
         if key in self.sent_keywords:
             del self.sent_keywords[key]
-            self.save()
+        if int(chat_id) in _processed_messages:
+            del _processed_messages[int(chat_id)]
+        self.save()
         return f"已清除群组 `{chat_id}` 的口令记录"
 
     def list_chats(self) -> str:
@@ -335,26 +420,156 @@ class LuckyDrawConfig:
 
     def increment_detected(self) -> None:
         """增加检测计数"""
-        self.stats["total_detected"] += 1
-        self.save()
+        self._pending_stats_changes["total_detected"] = self._pending_stats_changes.get("total_detected", 0) + 1
+        self._schedule_flush()
 
     def increment_joined(self) -> None:
         """增加参与计数"""
-        self.stats["total_joined"] += 1
-        self.save()
+        self._pending_stats_changes["total_joined"] = self._pending_stats_changes.get("total_joined", 0) + 1
+        self._schedule_flush()
 
     def increment_blocked(self) -> None:
         """增加拦截计数"""
-        self.stats["total_blocked"] += 1
-        self.save()
+        self._pending_stats_changes["total_blocked"] = self._pending_stats_changes.get("total_blocked", 0) + 1
+        self._schedule_flush()
 
 
 # 全局配置实例
 config = LuckyDrawConfig()
 
 
-# 待发送口令队列 {chat_id: {message_id: {"keyword": keyword, "type": keyword_type, "wait_count": int, "current_count": int}}}
+# 待处理抽奖队列
+# {chat_id_message_id: {"keyword": str, "keyword_type": str, "chat_id": int, "source_message_id": int}}
 pending_draws: Dict[str, dict] = {}
+
+# 群组+关键词级别的异步锁，防止并发重复发送
+# {(chat_id, keyword): asyncio.Lock()}
+keyword_locks: Dict[tuple, asyncio.Lock] = {}
+
+# ========== 性能优化：进程内消息去重 ==========
+# 用于快速判断消息是否已处理（进程内缓存，不依赖磁盘）
+_processed_messages: Dict[int, Set[str]] = defaultdict(set)  # {chat_id: {message_id1, message_id2, ...}}
+# ==========================================
+
+
+def normalize_text(text: Optional[str]) -> str:
+    """标准化文本，便于比较关键词"""
+    if not text:
+        return ""
+    return re.sub(r"\s+", "", text).strip().lower()
+
+
+def extract_red_packet_count(text: str) -> Optional[int]:
+    """
+    从红包消息中提取红包个数
+    支持格式：
+    - 📦 共3个
+    - 共 3 个
+    - 共3个
+    - 共10个
+    - 剩余2/3个 (新格式)
+    返回: 红包个数 或 None（无法解析）
+    """
+    if not text:
+        return None
+
+    # 优先匹配 "剩余X/Y个" 格式（取剩余个数）
+    remaining_pattern = r"剩余\s*(\d+)\s*/\s*\d+\s*个"
+    match = re.search(remaining_pattern, text)
+    if match:
+        count = int(match.group(1))
+        if count > 0:
+            return count
+
+    # 匹配 "共X个" 或 "共 X 个" 格式
+    patterns = [
+        r"共\s*(\d+)\s*个",  # 共3个, 共 3 个, 共 10 个
+        r"红包.*?(\d+)\s*个",  # 红包3个
+        r"数量[：:]\s*(\d+)",  # 数量: 3
+        r"共\s*(\d+)\s*份",  # 共3份
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            try:
+                count = int(match.group(1))
+                if count > 0:
+                    return count
+            except (ValueError, IndexError):
+                continue
+
+    return None
+
+
+def split_multiple_red_packets(text: str) -> List[str]:
+    """
+    分割多条红包的消息，返回单个红包块的列表
+    支持的分隔符：
+    - ➖➖➖➖➖➖➖➖➖➖
+    - ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
+    - ========
+    - -------
+    """
+    if not text:
+        return []
+
+    # 按分隔符分割
+    separators = [
+        r"➖{5,}",  # ➖➖➖➖➖➖➖➖➖➖
+        r"─{5,}",   # ────────────
+        r"={5,}",   # ===========
+        r"-{5,}",   # ----------
+    ]
+
+    blocks = [text]
+    for sep in separators:
+        new_blocks = []
+        for block in blocks:
+            parts = re.split(sep, block)
+            new_blocks.extend([p.strip() for p in parts if p.strip()])
+        blocks = new_blocks
+
+    # 过滤掉不含红包关键字的块
+    valid_blocks = []
+    for block in blocks:
+        block_clean = block.strip()
+        # 检查是否包含红包相关关键字
+        if any(keyword in block_clean for keyword in ["口令", "🔑", "红包", "🧧", "编号", "🆔", "总额"]):
+            valid_blocks.append(block_clean)
+
+    return valid_blocks
+
+
+def extract_keyword_from_block(block: str) -> Optional[tuple[str, str]]:
+    """
+    从单个红包块中提取口令
+    支持格式：
+    - 🔑 口令: 10
+    - 口令: 10
+    - 口令：10
+    返回: (口令, 类型) 或 None
+    """
+    if not block:
+        return None
+
+    # 匹配口令格式
+    patterns = [
+        (r"🔑\s*口令[：:]\s*(.+?)(?:\n|│|$)", "红包口令-emoji"),
+        (r"口令[：:]\s*(.+?)(?:\n|│|$)", "红包口令"),
+    ]
+
+    for pattern, keyword_type in patterns:
+        match = re.search(pattern, block)
+        if match:
+            keyword = match.group(1).strip()
+            # 清理口令中的引号和多余空格
+            keyword = keyword.strip('"\'「」【】 \n')
+            # 过滤掉明显的分隔符或无用字符
+            if keyword and keyword not in ["➖", "─", "=", "-"] and len(keyword) <= 50:
+                return (keyword, keyword_type)
+
+    return None
 
 
 def check_red_packet_finished(text: str, chat_id: int, is_test: bool) -> bool:
@@ -481,6 +696,9 @@ async def luckydraw_startup():
 @Hook.on_shutdown()
 async def luckydraw_shutdown():
     """插件关闭时执行"""
+    # 关闭前确保所有待刷新的数据写入磁盘
+    if config._pending_save:
+        await config._flush_to_disk()
     logs.info("[LuckyDraw] 自动抽奖插件已卸载")
 
 
@@ -572,7 +790,9 @@ async def show_help(message: Message):
 - `口令: xxx` → 发送 xxx
 
 **注意事项：**
-- 为避免被检测，插件会随机延迟后发送口令
+- 红包个数 < 5：直接发送关键词（抢小红包优先速度）
+- 红包个数 >= 5：转发群里首个回复关键词的用户消息（伪装成真人）
+- 如需延时防护，可用 `,ldraw delay` 命令设置
 - 测试群组会输出详细日志方便调试"""
 
     await message.edit(help_text)
@@ -674,14 +894,25 @@ async def test_extract(message: Message):
     if len(params) < 2:
         await message.edit(
             "**参数错误！**\n\n"
-            "使用方法: `,luckydraw test <文本>`\n\n"
-            "示例: `,luckydraw test 领取密令: 新年快乐`"
+            "使用方法:\n"
+            "`,ldraw test <文本>` - 测试单条口令提取\n"
+            "`,ldraw test multi <文本>` - 测试多条红包提取\n\n"
+            "示例:\n"
+            "`,ldraw test 领取密令: 新年快乐`\n"
+            "`,ldraw test multi [粘贴多条红包消息]`"
         )
         await asyncio.sleep(5)
         await message.delete()
         return
 
     test_text = params[1]
+
+    # 检查是否是 multi 模式
+    if test_text.lower().startswith("multi "):
+        test_text = test_text[6:]  # 去掉 "multi " 前缀
+        await test_multi_extract(message, test_text)
+        return
+
     result = KeywordExtractor.extract(test_text)
 
     if result:
@@ -700,6 +931,54 @@ async def test_extract(message: Message):
 
     await message.edit(output)
     await asyncio.sleep(5)
+    await message.delete()
+
+
+async def test_multi_extract(message: Message, test_text: str):
+    """测试多条红包口令提取"""
+    # 分割红包
+    blocks = split_multiple_red_packets(test_text)
+
+    if not blocks or len(blocks) <= 1:
+        # 如果分割不出多个红包，退回到单条提取
+        result = KeywordExtractor.extract(test_text)
+        if result:
+            keyword, keyword_type = result
+            output = (
+                f"**单条口令提取结果：**\n\n"
+                f"- 口令类型: `{keyword_type}`\n"
+                f"- 提取结果: `{keyword}`"
+            )
+        else:
+            output = "**未能从文本中提取到口令**\n\n无法识别多条红包格式。"
+        await message.edit(output)
+        await asyncio.sleep(5)
+        await message.delete()
+        return
+
+    output = f"**多条红包提取测试结果：**\n\n检测到 **{len(blocks)}** 个红包\n\n"
+    valid_count = 0
+
+    for i, block in enumerate(blocks):
+        # 提取单个红包的口令
+        block_result = extract_keyword_from_block(block)
+        # 提取剩余个数
+        red_packet_count = extract_red_packet_count(block)
+
+        if block_result:
+            keyword, keyword_type = block_result
+            count_info = f"剩余{red_packet_count}个" if red_packet_count else "个数未知"
+            mode = "转发" if (red_packet_count and red_packet_count >= 5) else "直发"
+
+            output += f"{i+1}. `{keyword}` | {count_info} | {mode}\n"
+            valid_count += 1
+        else:
+            output += f"{i+1}. ❌ 无法提取口令\n"
+
+    output += f"\n✅ 成功提取 {valid_count}/{len(blocks)} 个口令"
+
+    await message.edit(output)
+    await asyncio.sleep(8)
     await message.delete()
 
 
@@ -1065,14 +1344,121 @@ async def luckydraw_handler(message: Message, bot: Client):
     if check_red_packet_finished(text, chat_id, is_test):
         return
 
-    # 检查消息是否已处理（去重）
+    # 检查消息是否已处理（去重）- 进程内快速检查
     message_id = message.id
-    if config.is_message_processed(chat_id, message_id):
+    # 先检查进程内缓存（快速路径）
+    if message_id in _processed_messages[chat_id]:
         if is_test:
-            logs.info(f"[LuckyDraw] 消息已处理过，跳过 | message_id: {message_id}")
+            logs.info(f"[LuckyDraw] 消息已处理过(进程内)，跳过 | message_id: {message_id}")
         return
+    # 再检查磁盘（慢速路径）
+    if config.is_message_processed(chat_id, message_id):
+        _processed_messages[chat_id].add(str(message_id))  # 记录到进程内缓存
+        if is_test:
+            logs.info(f"[LuckyDraw] 消息已处理过(磁盘)，跳过 | message_id: {message_id}")
+        return
+    # 标记已处理
     config.mark_message_processed(chat_id, message_id)
+    _processed_messages[chat_id].add(str(message_id))
+    # 限制进程内缓存大小，防止内存泄漏
+    if len(_processed_messages[chat_id]) > 500:
+        # 只保留最近的200条
+        _processed_messages[chat_id] = set(list(_processed_messages[chat_id])[-200:])
 
+    # ========== 检查是否包含多条红包 ==========
+    red_packet_blocks = split_multiple_red_packets(text)
+
+    if is_test:
+        if red_packet_blocks:
+            logs.info(f"[LuckyDraw] 检测到多条红包，共 {len(red_packet_blocks)} 个")
+        else:
+            logs.info(f"[LuckyDraw] 单条红包消息")
+
+    if red_packet_blocks and len(red_packet_blocks) > 1:
+        # ========== 多条红包：逐个处理每个红包 ==========
+        # 标记消息已处理（防止重复）
+        # 实际上每个红包是独立的，这里不需要标记整条消息
+
+        processed_keywords = set()  # 记录本消息中已处理的口令（避免重复）
+
+        for i, block in enumerate(red_packet_blocks):
+            # 从单个红包块提取口令
+            block_result = extract_keyword_from_block(block)
+            if not block_result:
+                if is_test:
+                    logs.info(f"[LuckyDraw] 红包块 {i+1}: 无法提取口令")
+                continue
+
+            keyword, keyword_type = block_result
+
+            # 检查是否已处理过这个口令
+            if keyword in processed_keywords or config.has_sent_keyword(chat_id, keyword):
+                if is_test:
+                    logs.info(f"[LuckyDraw] 红包块 {i+1}: 口令已发送过，跳过 | {keyword}")
+                continue
+
+            processed_keywords.add(keyword)
+
+            # 检查是否红包已领完
+            if check_red_packet_finished(block, chat_id, is_test):
+                if is_test:
+                    logs.info(f"[LuckyDraw] 红包块 {i+1}: 红包已领完，跳过 | {keyword}")
+                continue
+
+            # 提取单个红包的剩余个数
+            red_packet_count = extract_red_packet_count(block)
+
+            # 判断模式
+            use_forward_mode = red_packet_count is not None and red_packet_count >= REDPACKET_COUNT_THRESHOLD
+
+            if is_test:
+                count_info = f"剩余{red_packet_count}个" if red_packet_count else "个数未知"
+                mode = "转发模式" if use_forward_mode else "直接发送"
+                logs.info(f"[LuckyDraw] 红包块 {i+1}: {count_info} | {mode} | 口令: {keyword}")
+
+            # 安全检测
+            is_safe, reason = SecurityChecker.is_safe(block, keyword)
+            if not is_safe:
+                if is_test:
+                    logs.info(f"[LuckyDraw] 红包块 {i+1}: 安全拦截 {reason}")
+                continue
+
+            if not use_forward_mode:
+                # ========== 直接发送关键词 ==========
+                # 获取延时配置
+                min_delay, max_delay = config.get_chat_delay(chat_id)
+                delay = random.uniform(min_delay, max_delay)
+                await asyncio.sleep(delay)
+
+                try:
+                    await bot.send_message(chat_id, keyword)
+                    config.mark_keyword_sent(chat_id, keyword)
+                    config.increment_joined()
+
+                    logs.info(
+                        f"[LuckyDraw] 多红包-直接发送 | 群组: {chat_id} | "
+                        f"口令: {keyword} | 延迟: {delay:.2f}s"
+                    )
+                except Exception as e:
+                    logs.error(f"[LuckyDraw] 多红包-直接发送失败: {e}")
+            else:
+                # ========== 转发模式 ==========
+                queue_key = f"{chat_id}_{message_id}_{i}"
+                pending_draws[queue_key] = {
+                    "keyword": keyword,
+                    "keyword_type": keyword_type,
+                    "chat_id": chat_id,
+                    "source_message_id": message_id,
+                    "block_index": i,
+                }
+
+                if is_test:
+                    logs.info(f"[LuckyDraw] 红包块 {i+1}: 已加入转发队列 | 口令: {keyword}")
+
+        # 多红包消息处理完成
+        return
+
+    # ========== 单条红包消息处理 ==========
     # 提取口令
     result = KeywordExtractor.extract(text)
     if not result:
@@ -1106,63 +1492,81 @@ async def luckydraw_handler(message: Message, bot: Client):
                 pass
         return
 
-    # 直接延时发送（不再等待其他用户回复）
+    # ========== 红包个数判断 ==========
+    # 提取红包个数，判断使用哪种参与方式
+    red_packet_count = extract_red_packet_count(text)
 
-    # 检查是否已有相同口令在队列中，避免重复加入
-    for existing_key, existing_pending in pending_draws.items():
-        if existing_pending.get("keyword") == keyword and existing_pending.get("chat_id") == chat_id:
+    if is_test:
+        logs.info(f"[LuckyDraw] 解析红包个数: {red_packet_count}")
+
+    # 红包个数 < 阈值 或 无法解析个数：直接发送关键词
+    # 红包个数 >= 阈值：等待群里有人回复后再转发
+    use_forward_mode = red_packet_count is not None and red_packet_count >= REDPACKET_COUNT_THRESHOLD
+
+    if is_test:
+        if use_forward_mode:
+            logs.info(f"[LuckyDraw] 红包个数 {red_packet_count} >= {REDPACKET_COUNT_THRESHOLD}，使用转发模式")
+        else:
+            mode_desc = f"红包个数 {red_packet_count}" if red_packet_count else "无法解析红包个数"
+            logs.info(f"[LuckyDraw] {mode_desc} < {REDPACKET_COUNT_THRESHOLD}，直接发送关键词")
+
+    if not use_forward_mode:
+        # ========== 直接发送关键词模式 ==========
+        # 检查是否已有相同口令在队列中，避免重复发送
+        if config.has_sent_keyword(chat_id, keyword):
             if is_test:
-                logs.info(f"[LuckyDraw] 相同口令已在队列中，跳过 | 口令: {keyword}")
+                logs.info(f"[LuckyDraw] 口令已发送过，跳过 | 口令: {keyword}")
             return
-    
-    # 将口令加入待发送队列
-    queue_key = f"{chat_id}_{message_id}"
-    pending_draws[queue_key] = {
-        "keyword": keyword,
-        "keyword_type": keyword_type,
-        "chat_id": chat_id,
-        "wait_count": 1,
-        "current_count": 0,
-    }
-    
-    # 获取群组的延时配置
-    min_delay, max_delay = config.get_chat_delay(chat_id)
-    delay = random.uniform(min_delay, max_delay)
-    
-    # 延时后发送
-    await asyncio.sleep(delay)
-    
-    # 检查是否已发送过（避免重复发送）
-    if config.has_sent_keyword(chat_id, keyword):
-        if is_test:
-            logs.info(f"[LuckyDraw] 口令已发送过，跳过 | 口令: {keyword}")
-    else:
-        # 发送口令
+
+        # 获取延时配置
+        min_delay, max_delay = config.get_chat_delay(chat_id)
+        delay = random.uniform(min_delay, max_delay)
+        await asyncio.sleep(delay)
+
         try:
             await bot.send_message(chat_id, keyword)
             config.mark_keyword_sent(chat_id, keyword)
             config.increment_joined()
-            
-            log_msg = (
-                f"[LuckyDraw] 成功参与抽奖 | "
+
+            logs.info(
+                f"[LuckyDraw] 成功参与抽奖（直接发送关键词） | "
                 f"群组: {chat_id} | "
                 f"类型: {keyword_type} | "
                 f"口令: {keyword} | "
                 f"延迟: {delay:.2f}s"
             )
-            logs.info(log_msg)
-            
+
             if is_test:
                 try:
-                    await bot.send_message(chat_id, f"✅ 已发送口令: {keyword}")
+                    await bot.send_message(chat_id, f"✅ 直接发送关键词: {keyword}")
                 except Exception:
                     pass
         except Exception as e:
-            logs.error(f"[LuckyDraw] 发送口令失败: {e}")
-    
-    # 从队列中移除
-    if queue_key in pending_draws:
-        del pending_draws[queue_key]
+            logs.error(f"[LuckyDraw] 直接发送关键词失败: {e}")
+        return
+
+    # ========== 转发模式：等待群里有人回复后再转发 ==========
+
+    # 检查是否已有相同口令在队列中，避免重复加入
+    for existing_key, existing_pending in pending_draws.items():
+        if existing_pending.get("keyword") == keyword and existing_pending.get("chat_id") == chat_id:
+            if is_test:
+                logs.info(f"[LuckyDraw] 相同口令已在等待队列中，跳过 | 口令: {keyword}")
+            return
+
+    queue_key = f"{chat_id}_{message_id}"
+    pending_draws[queue_key] = {
+        "keyword": keyword,
+        "keyword_type": keyword_type,
+        "chat_id": chat_id,
+        "source_message_id": message_id,
+    }
+
+    if is_test:
+        logs.info(
+            f"[LuckyDraw] 已加入等待队列，等待首个回复关键词的用户消息 | "
+            f"群组: {chat_id} | 类型: {keyword_type} | 口令: {keyword}"
+        )
 
 
 # ==================== 监听其他用户回复 ====================
@@ -1171,92 +1575,104 @@ async def luckydraw_handler(message: Message, bot: Client):
 @listener(is_plugin=True, incoming=True, outgoing=False, ignore_edited=False)
 async def luckydraw_reply_handler(message: Message, bot: Client):
     """
-    监听其他用户回复，触发口令发送
+    监听群内后续消息：
+    检测到抽奖关键词后，不再自己直接发送，而是转发第一个发送该关键词的用户原消息。
     """
-    # 检查是否在群组中
     if not message.chat:
         return
 
     chat_id = message.chat.id
     is_test = config.is_test_chat(chat_id)
 
-    # 检查是否在启用的群组中
     if not config.is_enabled(chat_id):
         return
 
-    # 检查消息是否已处理（去重）- 避免重复计数
-    message_id = message.id
-    if config.is_message_processed(chat_id, message_id):
+    pending_keys = [k for k in pending_draws.keys() if k.startswith(f"{chat_id}_")]
+    if not pending_keys:
         return
-    
-    # 检查是否是机器人自己的消息
+
+    # 忽略机器人自己发的消息
     sender = getattr(message, "sender_id", None)
     bot_id = (await bot.get_me()).id
     if sender == bot_id:
         return
 
-    # 检查是否有待发送的口令
-    pending_keys = [k for k in pending_draws.keys() if k.startswith(f"{chat_id}_")]
-    if not pending_keys:
+    # 提取当前消息文本
+    current_text = message.text or getattr(message, "caption", None) or getattr(message, "raw_text", None)
+    if not current_text:
         return
 
-    # 遍历待发送队列，检查是否有匹配的
+    current_text_normalized = normalize_text(current_text)
+
     for queue_key in list(pending_draws.keys()):
         if not queue_key.startswith(f"{chat_id}_"):
             continue
-        
+
         pending = pending_draws[queue_key]
         keyword = pending.get("keyword")
-        
-        # 检查口令是否已发送过，避免重复发送
+        keyword_type = pending.get("keyword_type")
+        source_message_id = pending.get("source_message_id")
+
         if config.has_sent_keyword(chat_id, keyword):
             if is_test:
-                logs.info(f"[LuckyDraw] 口令已发送过，跳过 | 口令: {keyword}")
-            # 从队列中移除
+                logs.info(f"[LuckyDraw] 口令已发送过，移出等待队列 | 口令: {keyword}")
             del pending_draws[queue_key]
             continue
-        
-        # 增加当前回复计数
-        
-        if is_test:
-            logs.info(f"[LuckyDraw] 用户回复，当前: {pending['current_count']}/{pending['wait_count']}")
-        
-        # 检查是否满足发送条件
-        if pending["current_count"] >= pending["wait_count"]:
-            keyword = pending["keyword"]
-            keyword_type = pending["keyword_type"]
-            
-            # 获取群组的延时配置
-            min_delay, max_delay = config.get_chat_delay(chat_id)
-            # 随机延迟，避免被检测为脚本
-            delay = random.uniform(min_delay, max_delay)
-            await asyncio.sleep(delay)
-            
-            # 发送口令
+
+        # 跳过抽奖源消息本身
+        if message.id == source_message_id:
+            continue
+
+        # 匹配群里后续用户发言：只要消息中包含抽奖关键词，就跟随转发该消息
+        keyword_normalized = normalize_text(keyword)
+        is_keyword_matched = keyword_normalized in current_text_normalized
+
+        if not is_keyword_matched:
+            continue
+
+        # 获取群组+关键词级别的锁，防止并发重复发送
+        lock_key = (chat_id, keyword)
+        if lock_key not in keyword_locks:
+            keyword_locks[lock_key] = asyncio.Lock()
+        lock = keyword_locks[lock_key]
+
+        # 获取群组延时配置
+        min_delay, max_delay = config.get_chat_delay(chat_id)
+        delay = random.uniform(min_delay, max_delay)
+        await asyncio.sleep(delay)
+
+        # 使用锁保护整个检查-转发-标记过程，确保原子性
+        async with lock:
+            # 二次检查，避免并发重复发送
+            if config.has_sent_keyword(chat_id, keyword):
+                if queue_key in pending_draws:
+                    del pending_draws[queue_key]
+                continue
+
             try:
-                await bot.send_message(chat_id, keyword)
-                # 标记口令已发送
+                await bot.forward_messages(chat_id, chat_id, message.id)
                 config.mark_keyword_sent(chat_id, keyword)
                 config.increment_joined()
-                
-                log_msg = (
-                    f"[LuckyDraw] 成功参与抽奖 | "
+
+                logs.info(
+                    f"[LuckyDraw] 成功参与抽奖（转发首个包含关键词的用户消息） | "
                     f"群组: {chat_id} | "
                     f"类型: {keyword_type} | "
                     f"口令: {keyword} | "
-                    f"等待人数: {pending['wait_count']} | "
+                    f"转发消息ID: {message.id} | "
                     f"延迟: {delay:.2f}s"
                 )
-                logs.info(log_msg)
-                
+
                 if is_test:
                     try:
-                        await bot.send_message(chat_id, f"✅ 已发送口令: {keyword}")
+                        await bot.send_message(chat_id, f"✅ 已转发首个关键词消息: {keyword}")
                     except Exception:
                         pass
             except Exception as e:
-                logs.error(f"[LuckyDraw] 发送口令失败: {e}")
-            
-            # 从队列中移除（安全删除，避免 KeyError）
-            if queue_key in pending_draws:
-                del pending_draws[queue_key]
+                logs.error(f"[LuckyDraw] 转发关键词消息失败: {e}")
+            finally:
+                if queue_key in pending_draws:
+                    del pending_draws[queue_key]
+                # 清理不再需要的锁（口令已发送或处理完成）
+                if lock_key in keyword_locks:
+                    del keyword_locks[lock_key]
