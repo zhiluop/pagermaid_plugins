@@ -67,6 +67,7 @@ SELF_EXCLUSION_KEYWORDS = [
     "我是蠢",
     "我是废物",
     "我是垃圾",
+    "/promote",
 ]
 
 # 抢红包随机延迟范围（秒）- 默认值
@@ -468,6 +469,7 @@ def extract_red_packet_count(text: str) -> Optional[int]:
     - 共3个
     - 共10个
     - 剩余2/3个 (新格式)
+    - 自动开奖人数：10（抽奖消息专用）
     返回: 红包个数 或 None（无法解析）
     """
     if not text:
@@ -476,6 +478,14 @@ def extract_red_packet_count(text: str) -> Optional[int]:
     # 优先匹配 "剩余X/Y个" 格式（取剩余个数）
     remaining_pattern = r"剩余\s*(\d+)\s*/\s*\d+\s*个"
     match = re.search(remaining_pattern, text)
+    if match:
+        count = int(match.group(1))
+        if count > 0:
+            return count
+
+    # 匹配 "自动开奖人数：X" 格式（抽奖消息，判断是否用转发模式）
+    auto_open_pattern = r"自动开奖人数[：:]\s*(\d+)"
+    match = re.search(auto_open_pattern, text)
     if match:
         count = int(match.group(1))
         if count > 0:
@@ -619,6 +629,29 @@ def check_red_packet_finished(text: str, chat_id: int, is_test: bool) -> bool:
             return True
     
     return False
+
+
+def is_lottery_bot_message(text: str) -> bool:
+    """
+    检测消息是否是抽奖机器人的消息格式
+    抽奖机器人使用关键词匹配，只要消息包含关键词即可参与
+    所以对于这种格式的消息，应该直接转发全文
+    """
+    if not text:
+        return False
+    
+    # 检测是否包含抽奖机器人消息的关键字段
+    lottery_bot_markers = [
+        "抽奖 ID：",
+        "参与关键词：",
+        "自动开奖人数：",
+    ]
+    
+    # 需要至少包含"抽奖 ID："和"参与关键词："才认为是抽奖机器人消息
+    has_lottery_id = "抽奖 ID：" in text
+    has_keyword = "参与关键词：" in text
+    
+    return has_lottery_id and has_keyword
 
 
 class KeywordExtractor:
@@ -1492,6 +1525,28 @@ async def luckydraw_handler(message: Message, bot: Client):
                 pass
         return
 
+    # ========== 抽奖机器人消息特殊处理 ==========
+    # 抽奖机器人使用关键词匹配，只要消息包含关键词即可参与
+    # 直接转发原文参与抽奖（不需要等待用户回复）
+    if is_lottery_bot_message(text):
+        if is_test:
+            logs.info(f"[LuckyDraw] 检测到抽奖机器人消息，直接转发原文参与 | 口令: {keyword}")
+        
+        try:
+            await bot.forward_messages(chat_id, chat_id, message.id)
+            config.mark_keyword_sent(chat_id, keyword)
+            config.increment_joined()
+            logs.info(f"[LuckyDraw] 成功参与抽奖（转发抽奖机器人原文） | 群组: {chat_id} | 口令: {keyword}")
+            
+            if is_test:
+                try:
+                    await bot.send_message(chat_id, f"✅ 直接转发原文参与: {keyword}")
+                except Exception:
+                    pass
+        except Exception as e:
+            logs.error(f"[LuckyDraw] 转发抽奖机器人消息失败: {e}")
+        return
+
     # ========== 红包个数判断 ==========
     # 提取红包个数，判断使用哪种参与方式
     red_packet_count = extract_red_packet_count(text)
@@ -1676,3 +1731,164 @@ async def luckydraw_reply_handler(message: Message, bot: Client):
                 # 清理不再需要的锁（口令已发送或处理完成）
                 if lock_key in keyword_locks:
                     del keyword_locks[lock_key]
+
+
+# ==================== 自动点击按钮抽奖 ====================
+
+# 按钮类型抽奖的关键词（按钮文本包含这些词时触发点击）
+BUTTON_CLICK_KEYWORDS = [
+    "领取",
+    "抽奖",
+    "参与",
+    "抢红包",
+    "领取红包",
+    "参与抽奖",
+    "立即参与",
+    "点击领取",
+    "马上抢",
+]
+
+# 按钮点击随机延迟范围（秒）
+BUTTON_CLICK_MIN_DELAY = 1.0
+BUTTON_CLICK_MAX_DELAY = 3.0
+
+
+@listener(is_plugin=True, incoming=True, outgoing=False, ignore_edited=False)
+async def luckydraw_button_handler(message: Message, bot: Client):
+    """
+    自动点击按钮抽奖处理器
+
+    检测带有 inline 按钮的抽奖消息，自动点击"领取红包"等按钮参与抽奖
+    """
+    # 检查是否在群组中
+    if not message.chat:
+        return
+
+    chat_id = message.chat.id
+    is_test = config.is_test_chat(chat_id)
+
+    # 检查是否在启用的群组中
+    if not config.is_enabled(chat_id):
+        return
+
+    # 检查消息是否有 inline 键盘
+    reply_markup = getattr(message, 'reply_markup', None)
+    if not reply_markup:
+        return
+
+    # 获取 inline 键盘
+    inline_keyboard = getattr(reply_markup, 'inline_keyboard', None)
+    if not inline_keyboard:
+        return
+
+    # ========== 机器人ID检测 ==========
+    sender_id = None
+    if hasattr(message, 'sender_chat') and message.sender_chat:
+        sender_id = message.sender_chat.id
+    elif hasattr(message, 'from_user') and message.from_user:
+        sender_id = message.from_user.id
+
+    forward_from = getattr(message, "forward_from", None)
+    forward_from_chat = getattr(message, "forward_from_chat", None)
+
+    actual_sender_id = sender_id
+    if forward_from:
+        actual_sender_id = getattr(forward_from, "id", sender_id)
+    elif forward_from_chat:
+        actual_sender_id = getattr(forward_from_chat, "id", sender_id)
+
+    # 检查发送者是否在白名单中
+    if not config.is_bot_allowed(actual_sender_id):
+        if is_test:
+            logs.debug(f"[LuckyDraw-Button] 发送者 {actual_sender_id} 不在白名单中，跳过")
+        return
+
+    # 检查消息是否已处理
+    message_id = message.id
+    button_key = f"{chat_id}_{message_id}_button"
+
+    if button_key in _processed_messages[chat_id]:
+        if is_test:
+            logs.debug(f"[LuckyDraw-Button] 消息已处理过，跳过 | message_id: {message_id}")
+        return
+
+    # 遍历所有按钮，查找匹配的抽奖按钮
+    target_row = None
+    target_col = None
+    target_button_text = None
+
+    for row_idx, row in enumerate(inline_keyboard):
+        for col_idx, button in enumerate(row):
+            button_text = getattr(button, 'text', '')
+            if not button_text:
+                continue
+
+            # 检查按钮文本是否包含关键词
+            for keyword in BUTTON_CLICK_KEYWORDS:
+                if keyword in button_text:
+                    target_row = row_idx
+                    target_col = col_idx
+                    target_button_text = button_text
+                    break
+
+            if target_row is not None:
+                break
+
+        if target_row is not None:
+            break
+
+    # 如果没有找到匹配的按钮，跳过
+    if target_row is None:
+        return
+
+    # 标记消息已处理
+    _processed_messages[chat_id].add(button_key)
+
+    # 增加检测计数
+    config.increment_detected()
+
+    if is_test:
+        logs.info(
+            f"[LuckyDraw-Button] 检测到按钮抽奖 | "
+            f"群组: {chat_id} | "
+            f"按钮: {target_button_text} | "
+            f"位置: ({target_row}, {target_col})"
+        )
+
+    # 获取群组延时配置
+    min_delay, max_delay = config.get_chat_delay(chat_id)
+    if min_delay == 0 and max_delay == 0:
+        # 如果没有配置延时，使用默认按钮点击延迟
+        min_delay = BUTTON_CLICK_MIN_DELAY
+        max_delay = BUTTON_CLICK_MAX_DELAY
+
+    delay = random.uniform(min_delay, max_delay)
+    await asyncio.sleep(delay)
+
+    try:
+        # 点击按钮
+        await message.click(target_row, target_col)
+
+        # 标记成功
+        config.increment_joined()
+
+        logs.info(
+            f"[LuckyDraw-Button] 成功点击抽奖按钮 | "
+            f"群组: {chat_id} | "
+            f"按钮: {target_button_text} | "
+            f"延迟: {delay:.2f}s"
+        )
+
+        if is_test:
+            try:
+                await bot.send_message(chat_id, f"✅ 已点击按钮: {target_button_text}")
+            except Exception:
+                pass
+
+    except Exception as e:
+        logs.error(
+            f"[LuckyDraw-Button] 点击按钮失败 | "
+            f"群组: {chat_id} | "
+            f"按钮: {target_button_text} | "
+            f"错误: {e}"
+        )
