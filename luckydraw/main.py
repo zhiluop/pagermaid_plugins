@@ -111,6 +111,7 @@ class LuckyDrawConfig:
         self.sent_messages: Set[str] = set()  # 已处理的消息ID {群组ID_消息ID}
         self.chat_delays: Dict[str, dict] = {}  # 群组延时配置 {群组ID: {"min": min_delay, "max": max_delay}}
         self.bot_whitelist: Set[int] = set()  # 抽奖机器人白名单
+        self.celebration_stickers: Set[str] = set()  # 中奖庆祝贴纸 file_unique_id 集合
         self.stats: Dict[str, int] = {
             "total_detected": 0,  # 检测到的抽奖次数
             "total_joined": 0,    # 成功参与的次数
@@ -140,6 +141,7 @@ class LuckyDrawConfig:
                     self.sent_messages = set(data.get("sent_messages", []))
                     self.chat_delays = data.get("chat_delays", {})
                     self.bot_whitelist = set(data.get("bot_whitelist", DEFAULT_BOT_WHITELIST))
+                    self.celebration_stickers = set(data.get("celebration_stickers", []))
                     self.stats = data.get("stats", self.stats)
             except Exception as e:
                 logs.error(f"[LuckyDraw] 加载配置失败: {e}")
@@ -222,6 +224,7 @@ class LuckyDrawConfig:
                         "sent_messages": list(self.sent_messages),
                         "chat_delays": self.chat_delays,
                         "bot_whitelist": list(self.bot_whitelist),
+                        "celebration_stickers": list(self.celebration_stickers),
                         "stats": self.stats,
                     },
                     f,
@@ -322,15 +325,25 @@ class LuckyDrawConfig:
         return output
 
     def has_sent_keyword(self, chat_id: int, keyword: str) -> bool:
-        """检查口令是否已发送"""
+        """检查口令是否已发送（同时检查内存和待刷新状态）"""
         key = str(chat_id)
-        if key not in self.sent_keywords:
-            return False
-        return keyword in self.sent_keywords[key]
+        # 先检查已刷新到磁盘的记录
+        if key in self.sent_keywords and keyword in self.sent_keywords[key]:
+            return True
+        # 再检查待刷新的变更（防止 flush 前重复触发）
+        if key in self._pending_keyword_changes and keyword in self._pending_keyword_changes[key]:
+            return True
+        return False
 
     def mark_keyword_sent(self, chat_id: int, keyword: str) -> None:
         """标记口令已发送"""
         key = str(chat_id)
+        # 立即更新内存状态，防止在 flush 前重复触发
+        if key not in self.sent_keywords:
+            self.sent_keywords[key] = []
+        if keyword not in self.sent_keywords[key]:
+            self.sent_keywords[key].append(keyword)
+        # 同时记录待刷新变更
         if key not in self._pending_keyword_changes:
             self._pending_keyword_changes[key] = []
         if keyword not in self._pending_keyword_changes[key]:
@@ -409,6 +422,42 @@ class LuckyDrawConfig:
             output += f"- 机器人ID: `{bot_id}`\n"
         output += "\n💡 只有这些机器人发布的抽奖才会参与"
         return output
+
+    # ========== 庆祝贴纸管理 ==========
+
+    def add_sticker(self, file_unique_id: str) -> str:
+        """添加庆祝贴纸"""
+        if file_unique_id in self.celebration_stickers:
+            return f"贴纸 `{file_unique_id}` 已在列表中"
+        self.celebration_stickers.add(file_unique_id)
+        self.save()
+        return f"已添加贴纸 `{file_unique_id}` 到庆祝列表"
+
+    def remove_sticker(self, file_unique_id: str) -> str:
+        """移除庆祝贴纸"""
+        if file_unique_id not in self.celebration_stickers:
+            return f"贴纸 `{file_unique_id}` 不在列表中"
+        self.celebration_stickers.remove(file_unique_id)
+        self.save()
+        return f"已从庆祝列表移除贴纸 `{file_unique_id}`"
+
+    def list_stickers(self) -> str:
+        """列出所有庆祝贴纸"""
+        if not self.celebration_stickers:
+            return "当前庆祝贴纸列表为空\n\n💡 使用 `,ldraw sticker add` 回复贴纸来添加"
+
+        output = "**庆祝贴纸列表：**\n\n"
+        for i, sticker_id in enumerate(self.celebration_stickers, 1):
+            output += f"{i}. `{sticker_id}`\n"
+        output += f"\n共 {len(self.celebration_stickers)} 个贴纸"
+        output += "\n\n💡 中奖后会随机发送一个贴纸庆祝"
+        return output
+
+    def get_random_sticker(self) -> Optional[str]:
+        """获取随机庆祝贴纸"""
+        if not self.celebration_stickers:
+            return None
+        return random.choice(list(self.celebration_stickers))
 
     def get_stats(self) -> str:
         """获取统计信息"""
@@ -584,47 +633,62 @@ def extract_keyword_from_block(block: str) -> Optional[tuple[str, str]]:
 
 def check_red_packet_finished(text: str, chat_id: int, is_test: bool) -> bool:
     """
-    检查红包是否已领完，如果是则清除该口令记录
+    检查红包/抽奖是否已结束，如果是则清除该口令记录
     返回: 是否处理了这个消息
     """
     # 红包已领完的模式
     finished_patterns = [
-        r"已领完",
+        r"已领完",              # 🧧 拼手气红包[xxx]已领完！
         r"已领取完毕",
         r"红包已被领完",
         r"领取详情:",
+        r"中奖信息",             # 抽奖开奖，显示中奖者信息
+        r"参与人数够啦.*开奖",   # 参与人数够啦！！开奖~
     ]
     
     for pattern in finished_patterns:
         if re.search(pattern, text, re.IGNORECASE):
-            # 提取红包ID
-            red_packet_id_match = re.search(r"(?:红包ID|ID|ID:)[^\d]*(\w+)", text, re.IGNORECASE)
-            red_packet_id = red_packet_id_match.group(1) if red_packet_id_match else None
-            
             # 提取红包口令（如果有）
             result = KeywordExtractor.extract(text)
-            if result:
-                keyword, _ = result
-                # 清除这个口令的记录
-                if config.has_sent_keyword(chat_id, keyword):
-                    # 重新添加已发送的关键字记录，这样下次相同口令就能发送了
-                    key = str(chat_id)
-                    if key in config.sent_keywords and keyword in config.sent_keywords[key]:
-                        config.sent_keywords[key].remove(keyword)
-                        config.save()
-                        logs.info(f"[LuckyDraw] 红包已领完，清除口令记录: {keyword}")
-                        if is_test:
-                            return True
-                    return True
+            extracted_keyword = result[0] if result else None
             
-            # 如果没有提取到口令，清除最近一个口令（保守处理）
-            key = str(chat_id)
-            if key in config.sent_keywords and config.sent_keywords[key]:
-                removed_keyword = config.sent_keywords[key].pop()
+            # 清除该群的所有 pending_draws（抽奖结束了）
+            cleared_pending = []
+            for pq_key in list(pending_draws.keys()):
+                if pq_key.startswith(f"{chat_id}_"):
+                    pending_info = pending_draws[pq_key]
+                    cleared_pending.append(pending_info.get("keyword", "unknown"))
+                    del pending_draws[pq_key]
+            if cleared_pending:
+                logs.info(f"[LuckyDraw] 抽奖已结束，清除待处理队列: {cleared_pending}")
+            
+            # 清除口令记录（以便下次相同口令能再次发送）
+            if extracted_keyword:
+                # 清除指定口令
+                key = str(chat_id)
+                if key in config.sent_keywords and extracted_keyword in config.sent_keywords[key]:
+                    config.sent_keywords[key].remove(extracted_keyword)
+                # 同步清除待刷新的变更，防止 flush 时被重新合并回来
+                if key in config._pending_keyword_changes and extracted_keyword in config._pending_keyword_changes[key]:
+                    config._pending_keyword_changes[key].remove(extracted_keyword)
                 config.save()
-                logs.info(f"[LuckyDraw] 红包已领完，清除最近口令记录: {removed_keyword}")
+                logs.info(f"[LuckyDraw] 抽奖已结束，清除口令记录: {extracted_keyword}")
                 if is_test:
-                    logs.info(f"[LuckyDraw] 检测到红包已领完，已清除最近口令记录")
+                    return True
+            else:
+                # 如果没有提取到口令，清除该群所有口令（保守处理）
+                key = str(chat_id)
+                removed = []
+                if key in config.sent_keywords and config.sent_keywords[key]:
+                    removed = config.sent_keywords.pop(key)
+                # 同步清除待刷新的变更，防止 flush 时被重新合并回来
+                if key in config._pending_keyword_changes:
+                    config._pending_keyword_changes.pop(key)
+                config.save()
+                if removed:
+                    logs.info(f"[LuckyDraw] 抽奖已结束，清除该群所有口令记录: {removed}")
+                if is_test:
+                    logs.info(f"[LuckyDraw] 检测到抽奖已结束，已清除该群所有口令记录")
             
             return True
     
@@ -782,6 +846,8 @@ async def ldraw_command(message: Message):
         await clear_keywords(message)
     elif cmd == "bot":
         await manage_bot(message)
+    elif cmd == "sticker":
+        await manage_sticker(message)
     else:
         await show_help(message)
 
@@ -816,6 +882,11 @@ async def show_help(message: Message):
 `,ldraw stats` - 查看统计信息
 `,ldraw test <文本>` - 测试口令提取功能
 `,ldraw clear` - 清除已发送口令记录
+
+**庆祝贴纸：**
+`,ldraw sticker list` - 查看庆祝贴纸列表
+`,ldraw sticker add` - 回复贴纸添加到列表（中奖后自动发送）
+`,ldraw sticker del` - 回复贴纸从列表移除
 
 **支持的口令格式：**
 - `领取密令: xxx` → 发送 xxx
@@ -1088,6 +1159,100 @@ async def manage_bot(message: Message):
         return
     
     await message.edit(f"**{result}**")
+    await asyncio.sleep(3)
+    await message.delete()
+
+
+async def manage_sticker(message: Message):
+    """管理庆祝贴纸"""
+    params = message.arguments.split()
+
+    if len(params) < 2:
+        await message.edit(
+            "**庆祝贴纸管理**\n\n"
+            "使用方法:\n"
+            "`,ldraw sticker list` - 查看庆祝贴纸列表\n"
+            "`,ldraw sticker add` - 回复贴纸添加到列表\n"
+            "`,ldraw sticker del <序号>` - 按序号删除贴纸\n"
+            "`,ldraw sticker del` - 回复贴纸从列表移除\n"
+            "`,ldraw sticker clear` - 清空所有贴纸\n\n"
+            "💡 中奖后会随机发送一个贴纸庆祝"
+        )
+        await asyncio.sleep(8)
+        await message.delete()
+        return
+
+    action = params[1].lower()
+
+    if action == "list":
+        result = config.list_stickers()
+        await message.edit(result)
+        await asyncio.sleep(5)
+        await message.delete()
+        return
+
+    if action == "clear":
+        config.celebration_stickers.clear()
+        config.save()
+        await message.edit("**已清空所有庆祝贴纸**")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    if action in ["del", "remove", "delete"]:
+        # 支持按序号删除: `,ldraw sticker del 1`
+        if len(params) >= 3:
+            try:
+                index = int(params[2])
+                sticker_list = list(config.celebration_stickers)
+                if index < 1 or index > len(sticker_list):
+                    await message.edit(f"**序号超出范围！**\n\n当前共有 {len(sticker_list)} 个贴纸")
+                    await asyncio.sleep(3)
+                    await message.delete()
+                    return
+                target_id = sticker_list[index - 1]
+                result = config.remove_sticker(target_id)
+                await message.edit(f"**{result}**")
+                await asyncio.sleep(3)
+                await message.delete()
+                return
+            except ValueError:
+                await message.edit("**序号格式错误！**\n\n请输入有效的数字序号")
+                await asyncio.sleep(3)
+                await message.delete()
+                return
+
+    # add 操作需要回复贴纸
+    if action == "add":
+        if not message.reply_to_message:
+            await message.edit("**请回复一个贴纸消息来添加！**")
+            await asyncio.sleep(3)
+            await message.delete()
+            return
+
+        reply_msg = message.reply_to_message
+        sticker = getattr(reply_msg, 'sticker', None)
+
+        if not sticker:
+            await message.edit("**回复的消息不是贴纸！**")
+            await asyncio.sleep(3)
+            await message.delete()
+            return
+
+        file_id = getattr(sticker, 'file_id', None)
+        if not file_id:
+            await message.edit("**无法获取贴纸ID！**")
+            await asyncio.sleep(3)
+            await message.delete()
+            return
+
+        result = config.add_sticker(file_id)
+        await message.edit(f"**{result}**")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    await message.edit("**未知操作！**\n\n支持的操作: list, add, del, clear")
     await asyncio.sleep(3)
     await message.delete()
 
@@ -1890,5 +2055,139 @@ async def luckydraw_button_handler(message: Message, bot: Client):
             f"[LuckyDraw-Button] 点击按钮失败 | "
             f"群组: {chat_id} | "
             f"按钮: {target_button_text} | "
+            f"错误: {e}"
+        )
+
+
+# ==================== 中奖庆祝贴纸 ====================
+
+# 中奖关键词（消息包含这些词时触发庆祝）
+WIN_KEYWORDS = [
+    "恭喜",
+    "中奖",
+    "获得",
+    "抢到",
+    "领到",
+    "抽中",
+    "获得红包",
+    "恭喜你",
+]
+
+# 非中奖关键词（包含这些词时不触发）
+NOT_WIN_KEYWORDS = [
+    "没中",
+    "未中",
+    "遗憾",
+    "可惜",
+    "下次",
+    "再接再厉",
+    "未抽中",
+    "没有中",
+    "手慢了",
+    "已领完",
+]
+
+# 中奖庆祝延迟范围（秒）
+CELEBRATION_MIN_DELAY = 3.0
+CELEBRATION_MAX_DELAY = 5.0
+
+
+@listener(is_plugin=True, incoming=True, outgoing=False, ignore_edited=False)
+async def win_celebration_handler(message: Message, bot: Client):
+    """
+    中奖庆祝处理器
+
+    检测中奖消息中是否包含自己的 ID，延时 3-5 秒发送随机庆祝贴纸
+    """
+    # 检查是否在群组中
+    if not message.chat:
+        return
+
+    chat_id = message.chat.id
+
+    # 检查是否在启用的群组中
+    if not config.is_enabled(chat_id):
+        return
+
+    # 检查是否有庆祝贴纸
+    if not config.celebration_stickers:
+        return
+
+    # 获取消息文本
+    text = message.text or message.caption or ""
+    if not text:
+        return
+
+    # 检查是否包含非中奖关键词
+    for keyword in NOT_WIN_KEYWORDS:
+        if keyword in text:
+            return
+
+    # 检查是否包含中奖关键词
+    is_win = False
+    for keyword in WIN_KEYWORDS:
+        if keyword in text:
+            is_win = True
+            break
+
+    if not is_win:
+        return
+
+    # 检查发送者是否在白名单中（只响应抽奖机器人的中奖通知）
+    sender_id = None
+    if hasattr(message, 'sender_chat') and message.sender_chat:
+        sender_id = message.sender_chat.id
+    elif hasattr(message, 'from_user') and message.from_user:
+        sender_id = message.from_user.id
+
+    if not sender_id or not config.is_bot_allowed(sender_id):
+        return
+
+    # ========== 关键：检查消息中是否包含自己的用户 ID ==========
+    try:
+        me = await bot.get_me()
+        my_id = me.id
+        # 检查消息文本中是否包含自己的 ID（格式如：(1234567890)）
+        if f"({my_id})" not in text:
+            # 不是自己中奖，跳过
+            return
+    except Exception as e:
+        logs.debug(f"[LuckyDraw-Celebration] 获取自己ID失败: {e}")
+        return
+
+    # 防止重复庆祝
+    message_id = message.id
+    celebration_key = f"{chat_id}_{message_id}_celebration"
+
+    if celebration_key in _processed_messages[chat_id]:
+        return
+
+    _processed_messages[chat_id].add(celebration_key)
+
+    # 获取随机贴纸
+    sticker_id = config.get_random_sticker()
+    if not sticker_id:
+        return
+
+    # 随机延迟 3-5 秒
+    delay = random.uniform(CELEBRATION_MIN_DELAY, CELEBRATION_MAX_DELAY)
+    await asyncio.sleep(delay)
+
+    try:
+        # 发送贴纸
+        await bot.send_sticker(chat_id, sticker_id)
+
+        logs.info(
+            f"[LuckyDraw-Celebration] 发送庆祝贴纸 | "
+            f"群组: {chat_id} | "
+            f"贴纸: {sticker_id} | "
+            f"延迟: {delay:.2f}s"
+        )
+
+    except Exception as e:
+        logs.error(
+            f"[LuckyDraw-Celebration] 发送贴纸失败 | "
+            f"群组: {chat_id} | "
+            f"贴纸: {sticker_id} | "
             f"错误: {e}"
         )

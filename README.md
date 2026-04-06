@@ -28,12 +28,12 @@
 - `cai` - 自动点踩插件
 - `jpm` - 关键词触发回复插件
 - `jpmai` - AI 生成艳情文案插件
-- `ais` - AI 查询插件
+- `ais` - AI 查询插件（支持联网搜索增强）
 - `get_reactions` - 表情获取辅助命令
 - `share_plugins` - 分享插件
-- `stfollow` - 贴纸跟随插件
+- `sfl` - 贴纸跟随插件
 - `sar` - 贴纸自动回复插件
-- `luckydraw` - 自动抽奖插件
+- `luckydraw` - 自动抽奖插件（支持中奖庆祝贴纸）
 
 ### 手动安装
 
@@ -44,17 +44,17 @@
 
 ## 插件列表
 
-| 插件 | 说明 |
-|------|------|
-| CAI | 自动点踩插件 - 自动对目标用户的发言进行点踩 |
-| JPM | 关键词触发回复插件 - 支持多关键词、频率限制、锚点消息系统 |
-| JPMAI | AI 生成艳情文案插件 - 调用 AI 模型实时生成仿明清艳情小说风格的回复，支持仅主人触发模式 |
-| AIS | AI 查询插件 - 向 AI 模型提问并返回回复，支持自定义 API 配置 |
-| Get Reactions | 表情获取辅助命令 - 用于测试环境是否支持自定义表情反应 |
-| Share Plugins | 分享插件 - 将插件以文件形式分享，支持列表查看和序号选择 |
-| StFollow | 贴纸跟随插件 - 在特定群组中自动跟随发送特定贴纸，管理命令自动撤回 |
-| SAR | 贴纸自动回复插件 - 当有人用贴纸回复你的消息时，自动回复相同的贴纸，管理命令自动撤回 |
-| LuckyDraw | 自动抽奖插件 - 在指定群组中自动识别红包/抽奖活动并发送口令参与，支持脚本检测规避与群组延时管理 |
+| 插件 | 说明 | 文档 |
+|------|------|------|
+| CAI | 自动点踩插件 - 自动对目标用户的发言进行点踩 | [cai/DES.md](./cai/DES.md) |
+| JPM | 关键词触发回复插件 - 支持多关键词、频率限制、锚点消息系统 | [jpm/DES.md](./jpm/DES.md) |
+| JPMAI | AI 生成艳情文案插件 - 调用 AI 模型实时生成仿明清艳情小说风格的回复，支持仅主人触发模式 | [jpmai/DES.md](./jpmai/DES.md) |
+| AIS | AI 查询插件 - 支持 OpenAI 格式 API、自定义模型切换、MCP 工具接入，以及由模型决策是否联网搜索的增强问答 | [ais/DES.md](./ais/DES.md) |
+| Get Reactions | 表情获取辅助命令 - 用于测试环境是否支持自定义表情反应 | [get_reactions/DES.md](./get_reactions/DES.md) |
+| Share Plugins | 分享插件 - 将插件以文件形式分享，支持列表查看和序号选择 | [share_plugins/DES.md](./share_plugins/DES.md) |
+| SFL | 贴纸跟随插件 - 在特定群组中自动跟随发送特定贴纸，管理命令自动撤回 | [sfl/DES.md](./sfl/DES.md) |
+| SAR | 贴纸自动回复插件 - 当有人用贴纸回复你的消息时，自动回复相同的贴纸，管理命令自动撤回 | [sar/DES.md](./sar/DES.md) |
+| LuckyDraw | 自动抽奖插件 - 在指定群组中自动识别红包/抽奖活动并发送口令参与，支持机器人白名单、群组延时与中奖庆祝贴纸 | [luckydraw/DES.md](./luckydraw/DES.md) |
 
 ## 项目结构
 
@@ -78,7 +78,7 @@ tegbot_plugin/
 ├── share_plugins/           # 分享插件
 │   ├── main.py             # 插件主文件
 │   └── DES.md              # 插件描述
-├── stfollow/               # 贴纸跟随插件
+├── sfl/                    # 贴纸跟随插件
 │   ├── main.py             # 插件主文件
 │   └── DES.md              # 插件描述
 ├── sar/                    # 贴纸自动回复插件
@@ -102,7 +102,7 @@ tegbot_plugin/
 
 1. 创建插件文件夹：`mkdir your_plugin`
 2. 创建 `main.py` 文件：插件主代码
-3. 创建 `DES.md` 文件：插件简短描述
+3. 创建 `DES.md` 文件：插件描述
 4. 运行 `python scripts/update_list.py`：自动更新插件列表
 
 ## 许可证

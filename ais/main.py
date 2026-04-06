@@ -7,9 +7,12 @@ AI 查询插件 - 向AI模型提问并返回回复
 """
 
 import asyncio
+import html
 import json
+import re
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs, unquote, urlparse
 
 import aiohttp
 
@@ -30,6 +33,112 @@ except ImportError:
 DATA_DIR = Path("ai_query")
 DATA_FILE = DATA_DIR / "config.json"
 PENDING_SELECTION = {}  # 待选择的模型列表消息
+DEFAULT_SEARCH_CONFIG = {
+    "enabled": True,
+    "max_results": 5,
+}
+SEARCH_TIMEOUT = 20
+SEARCH_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/123.0.0.0 Safari/537.36"
+)
+CREATIVE_PREFIXES = (
+    "写",
+    "帮我写",
+    "润色",
+    "改写",
+    "翻译",
+    "总结",
+    "扩写",
+    "续写",
+    "生成",
+    "编一个",
+    "虚构",
+)
+SEARCH_HINT_WORDS = (
+    "谁",
+    "什么",
+    "哪家",
+    "哪个",
+    "哪位",
+    "哪一个",
+    "哪里",
+    "何时",
+    "时间",
+    "地点",
+    "为什么",
+    "新闻",
+    "最近",
+    "最新",
+    "报道",
+    "事件",
+    "背景",
+    "资料",
+    "信息",
+    "介绍",
+    "来源",
+    "事实",
+    "真实",
+    "核实",
+    "查询",
+)
+SEARCH_NOISE_WORDS = (
+    "请问",
+    "我想知道",
+    "帮我查",
+    "帮我搜",
+    "帮我搜索",
+    "给我查",
+    "给我搜",
+    "告诉我",
+    "麻烦你",
+    "能不能",
+    "一下",
+    "一下子",
+    "这个",
+    "这件事",
+    "事情",
+    "到底",
+    "具体",
+    "相关",
+    "情况",
+)
+ANSWER_SYSTEM_PROMPT = """你是一个偏事实核查风格的中文问答助手。
+
+回答时必须遵守：
+1. 先识别用户真正想知道的核心点，再围绕这个点直接作答，不要把问题偷换成泛泛的背景分析。
+2. 如果用户在问“是谁 / 哪家公司 / 代表作 / 合作方 / 拖欠对象 / 时间 / 地点”，优先直接给出这些结论。
+3. 回答基于已提供的信息，不要编造；无法确认就明确写“暂未确认”。
+4. 不展示思考过程，不要长篇铺垫，不要空泛说教。
+5. 尽量先给结论，再补充 2-4 条关键信息。"""
+
+SEARCH_ANSWER_PROMPT = """你正在根据联网搜索结果回答用户问题。
+
+请严格遵守：
+1. 先判断用户真正想知道的目标信息是什么。
+2. 优先直接回答目标信息，不要把回答重心偏到原因分析、价值判断或泛泛背景。
+3. 仅依据给定搜索结果回答；若结果不足以确认，请明确说明“根据当前搜索结果暂未确认”。
+4. 如果结果里出现多个候选对象，请列出最可能的对象，并说明区分依据。
+5. 结尾附上“参考线索：”一行，列出 1-3 个来源名称或标题，不要粘贴长链接。"""
+SEARCH_ROUTER_PROMPT = """你是一个联网搜索路由助手。
+
+你的任务是判断：当前用户问题是否应该先联网搜索，再由模型回答。
+
+请严格输出 JSON，不要输出 JSON 以外的任何文字，格式如下：
+{
+  "use_search": true,
+  "intent": "用户真正想知道的核心信息，20字以内",
+  "search_queries": ["搜索词1", "搜索词2"],
+  "reason": "简短说明为什么要搜或为什么不用搜"
+}
+
+决策规则：
+1. 涉及新闻、人物、公司、事件、作品、时间、地点、事实核查、实体识别、关系确认时，优先 use_search=true。
+2. 用户虽然没写“谁/哪家/什么”，但如果本质上是在问一个现实世界事实，也应 use_search=true。
+3. 纯创作、润色、改写、翻译、闲聊、主观建议，通常 use_search=false。
+4. search_queries 需要贴近用户真实意图，避免空泛；最多 4 个。
+5. 如果 use_search=false，search_queries 返回空数组。"""
 
 # MCP 相关
 if HAS_MCP:
@@ -42,16 +151,17 @@ def load_config() -> dict:
     if DATA_FILE.exists():
         try:
             data = json.loads(DATA_FILE.read_text(encoding="utf-8"))
-            return data
+            return normalize_config(data)
         except Exception as e:
             logs.error(f"加载配置失败: {e}")
-            return {}
-    return {}
+            return normalize_config({})
+    return normalize_config({})
 
 
 def save_config(config: dict) -> bool:
     """保存AI配置"""
     try:
+        config = normalize_config(config)
         DATA_DIR.mkdir(exist_ok=True, parents=True)
         DATA_FILE.write_text(
             json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -67,8 +177,503 @@ def get_current_model(config: dict) -> str:
     return config.get("current_model", "") or config.get("model", "")
 
 
+def normalize_config(config: Optional[dict]) -> dict:
+    """补齐默认配置并清洗异常值"""
+    config = config.copy() if isinstance(config, dict) else {}
+
+    raw_search = config.get("search")
+    if not isinstance(raw_search, dict):
+        raw_search = {}
+
+    max_results = raw_search.get("max_results", DEFAULT_SEARCH_CONFIG["max_results"])
+    try:
+        max_results = int(max_results)
+    except (TypeError, ValueError):
+        max_results = DEFAULT_SEARCH_CONFIG["max_results"]
+
+    config["search"] = {
+        "enabled": bool(raw_search.get("enabled", DEFAULT_SEARCH_CONFIG["enabled"])),
+        "max_results": max(1, min(max_results, 8)),
+    }
+    return config
+
+
+def get_search_config(config: dict) -> dict:
+    """获取搜索配置"""
+    return normalize_config(config)["search"]
+
+
+def should_use_web_search(question: str, search_config: dict) -> bool:
+    """搜索决策失败时的兜底规则"""
+    if not search_config.get("enabled", True):
+        return False
+
+    text = question.strip().lower()
+    if not text:
+        return False
+
+    if text.startswith(CREATIVE_PREFIXES):
+        return False
+
+    if any(word in question for word in SEARCH_HINT_WORDS):
+        return True
+
+    if len(question) >= 8 and not re.search(r"[。！？]$", question):
+        return True
+
+    return False
+
+
+def build_search_queries(question: str) -> list[str]:
+    """为问题生成一组搜索词"""
+    normalized = re.sub(r"\s+", " ", question).strip()
+    cleaned = normalized
+    for noise in SEARCH_NOISE_WORDS:
+        cleaned = cleaned.replace(noise, "")
+
+    cleaned = re.sub(r"[，。！？、“”\"'：:（）()【】\[\]]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    candidates = [normalized]
+    if cleaned and cleaned != normalized:
+        candidates.append(cleaned)
+
+    if cleaned:
+        if not any(keyword in cleaned for keyword in ("新闻", "事件", "公司")):
+            candidates.append(f"{cleaned} 事件")
+        if any(keyword in normalized for keyword in ("哪家公司", "哪个公司", "公司", "拖欠", "外包")):
+            candidates.append(f"{cleaned} 公司")
+
+    unique_queries = []
+    for item in candidates:
+        if item and item not in unique_queries:
+            unique_queries.append(item)
+    return unique_queries[:4]
+
+
+def extract_json_object(raw_text: str) -> Optional[dict]:
+    """从模型回复中提取 JSON 对象"""
+    if not raw_text:
+        return None
+
+    text = raw_text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        pass
+
+    match = re.search(r"\{[\s\S]*\}", text)
+    if not match:
+        return None
+
+    try:
+        parsed = json.loads(match.group(0))
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
+def normalize_search_plan(
+    question: str,
+    search_config: dict,
+    raw_plan: Optional[dict] = None,
+) -> dict:
+    """规范化搜索计划"""
+    fallback_use_search = should_use_web_search(question, search_config)
+    fallback_queries = build_search_queries(question) if fallback_use_search else []
+    plan = raw_plan if isinstance(raw_plan, dict) else {}
+
+    use_search = bool(plan.get("use_search", fallback_use_search))
+    if not search_config.get("enabled", True):
+        use_search = False
+
+    if question.strip().lower().startswith(CREATIVE_PREFIXES):
+        use_search = False
+
+    raw_queries = plan.get("search_queries", [])
+    if isinstance(raw_queries, str):
+        raw_queries = [raw_queries]
+    if not isinstance(raw_queries, list):
+        raw_queries = []
+
+    queries = []
+    for item in raw_queries:
+        if not isinstance(item, str):
+            continue
+        query = re.sub(r"\s+", " ", item).strip()
+        if query and query not in queries:
+            queries.append(query)
+
+    if use_search and not queries:
+        queries = fallback_queries
+
+    return {
+        "use_search": use_search,
+        "intent": str(plan.get("intent", "")).strip()[:80],
+        "reason": str(plan.get("reason", "")).strip()[:120],
+        "search_queries": queries[:4],
+    }
+
+
+def build_search_router_messages(question: str) -> list[dict]:
+    """构造搜索决策消息"""
+    return [
+        {"role": "system", "content": SEARCH_ROUTER_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"用户问题：{question}\n\n"
+                "请只返回 JSON，不要附加解释。"
+            ),
+        },
+    ]
+
+
+def clean_search_text(raw_text: str) -> str:
+    """清理搜索结果中的 HTML 文本"""
+    text = re.sub(r"<.*?>", " ", raw_text or "")
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def unwrap_search_url(url: str) -> str:
+    """解析搜索引擎跳转链接"""
+    if not url:
+        return ""
+
+    url = html.unescape(url)
+    if url.startswith("//"):
+        url = f"https:{url}"
+
+    parsed = urlparse(url)
+    if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
+        target_url = parse_qs(parsed.query).get("uddg", [])
+        if target_url:
+            return unquote(target_url[0])
+    return url
+
+
+def parse_duckduckgo_results(page_text: str, max_results: int) -> list[dict]:
+    """解析 DuckDuckGo HTML 搜索结果"""
+    result_pattern = re.compile(
+        r'<a[^>]*class="result__a"[^>]*href="(?P<url>[^"]+)"[^>]*>(?P<title>.*?)</a>',
+        re.S,
+    )
+    results = []
+    seen_urls = set()
+
+    for match in result_pattern.finditer(page_text):
+        url = unwrap_search_url(match.group("url"))
+        title = clean_search_text(match.group("title"))
+        if not url or not title or url in seen_urls:
+            continue
+
+        nearby_text = page_text[match.end(): match.end() + 2000]
+        snippet_match = re.search(
+            r'class="result__snippet"[^>]*>(.*?)</(?:a|div)>',
+            nearby_text,
+            re.S,
+        )
+        snippet = clean_search_text(snippet_match.group(1)) if snippet_match else ""
+
+        results.append(
+            {
+                "title": title,
+                "url": url,
+                "snippet": snippet,
+            }
+        )
+        seen_urls.add(url)
+
+        if len(results) >= max_results:
+            break
+
+    return results
+
+
+async def duckduckgo_search(query: str, max_results: int) -> list[dict]:
+    """使用 DuckDuckGo HTML 进行搜索"""
+    headers = {
+        "User-Agent": SEARCH_USER_AGENT,
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": "https://duckduckgo.com/",
+    }
+    params = {
+        "q": query,
+        "kl": "cn-zh",
+    }
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=SEARCH_TIMEOUT)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                "https://html.duckduckgo.com/html/",
+                headers=headers,
+                params=params,
+            ) as response:
+                if response.status != 200:
+                    logs.warning(f"DuckDuckGo 搜索失败: {response.status}")
+                    return []
+                page_text = await response.text()
+                return parse_duckduckgo_results(page_text, max_results)
+    except asyncio.TimeoutError:
+        logs.warning("DuckDuckGo 搜索超时")
+        return []
+    except Exception as e:
+        logs.warning(f"DuckDuckGo 搜索异常: {e}")
+        return []
+
+
+async def search_web(question: str, max_results: int) -> tuple[list[dict], str]:
+    """执行联网搜索并返回结果"""
+    queries = build_search_queries(question)
+    merged_results = []
+    seen_urls = set()
+    used_query = ""
+
+    for query in queries:
+        results = await duckduckgo_search(query, max_results)
+        if results and not used_query:
+            used_query = query
+
+        for item in results:
+            url = item.get("url", "")
+            if not url or url in seen_urls:
+                continue
+            merged_results.append(item)
+            seen_urls.add(url)
+            if len(merged_results) >= max_results:
+                return merged_results, used_query or query
+
+    return merged_results, used_query or (queries[0] if queries else question)
+
+
+async def search_web_by_queries(
+    question: str,
+    queries: list[str],
+    max_results: int,
+) -> tuple[list[dict], str]:
+    """按指定搜索词执行联网搜索"""
+    normalized_queries = []
+    for item in queries:
+        if not isinstance(item, str):
+            continue
+        query = re.sub(r"\s+", " ", item).strip()
+        if query and query not in normalized_queries:
+            normalized_queries.append(query)
+
+    if not normalized_queries:
+        return await search_web(question, max_results)
+
+    merged_results = []
+    seen_urls = set()
+    used_query = ""
+
+    for query in normalized_queries[:4]:
+        results = await duckduckgo_search(query, max_results)
+        if results and not used_query:
+            used_query = query
+
+        for item in results:
+            url = item.get("url", "")
+            if not url or url in seen_urls:
+                continue
+            merged_results.append(item)
+            seen_urls.add(url)
+            if len(merged_results) >= max_results:
+                return merged_results, used_query or query
+
+    return merged_results, used_query or normalized_queries[0]
+
+
+def format_search_results(results: list[dict]) -> str:
+    """把搜索结果整理成提示词上下文"""
+    if not results:
+        return "暂无搜索结果。"
+
+    lines = []
+    for index, item in enumerate(results, start=1):
+        snippet = item.get("snippet") or "无摘要"
+        lines.append(
+            f"{index}. 标题：{item.get('title', '未知标题')}\n"
+            f"   摘要：{snippet}\n"
+            f"   链接：{item.get('url', '未知链接')}"
+        )
+    return "\n".join(lines)
+
+
+def build_search_answer_messages(
+    question: str,
+    results: list[dict],
+    search_query: str,
+    intent: str = "",
+) -> list[dict]:
+    """构造带搜索上下文的对话消息"""
+    context = format_search_results(results)
+    intent_text = intent or "请先自行判断用户真正想知道的核心信息。"
+    user_prompt = (
+        f"用户问题：{question}\n\n"
+        f"模型识别的用户核心意图：{intent_text}\n\n"
+        f"本次使用的搜索词：{search_query}\n\n"
+        f"搜索结果：\n{context}\n\n"
+        "请直接回答用户最想知道的内容。"
+    )
+    return [
+        {"role": "system", "content": SEARCH_ANSWER_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def build_direct_answer_messages(question: str) -> list[dict]:
+    """构造普通问答消息"""
+    return [
+        {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
+        {"role": "user", "content": question},
+    ]
+
+
+def format_search_fallback(results: list[dict], question: str) -> str:
+    """AI 调用失败时，返回搜索摘要兜底"""
+    if not results:
+        return "❌ AI 回复获取失败，请检查配置或网络连接"
+
+    lines = [f"🌐 已联网搜索，但 AI 归纳失败。\n\n问题：{question}\n\n可参考线索："]
+    for index, item in enumerate(results[:3], start=1):
+        snippet = item.get("snippet") or "无摘要"
+        lines.append(
+            f"{index}. {item.get('title', '未知标题')}\n"
+            f"   {snippet}\n"
+            f"   {item.get('url', '未知链接')}"
+        )
+    return "\n".join(lines)
+
+
+def is_ai_success(result: Optional[str]) -> bool:
+    """判断 AI 调用是否成功"""
+    return bool(
+        result
+        and not result.startswith("API调用失败")
+        and not result.startswith("调用异常")
+        and result != "请求超时"
+    )
+
+
+async def handle_search_command(message: Message, text: str):
+    """处理搜索增强配置命令"""
+    parts = text.split()
+    action = parts[1].lower() if len(parts) > 1 else "status"
+
+    config = load_config()
+    search_config = get_search_config(config)
+
+    if action in ("status", "show"):
+        status = "开启" if search_config["enabled"] else "关闭"
+        await message.edit(
+            "🌐 搜索增强状态\n\n"
+            f"开关：{status}\n"
+            f"结果条数：{search_config['max_results']}\n\n"
+            "命令示例：\n"
+            "  ,ais search on\n"
+            "  ,ais search off\n"
+            "  ,ais search max 5"
+        )
+        return
+
+    if action in ("on", "enable"):
+        config["search"]["enabled"] = True
+        if save_config(config):
+            await message.edit("✅ 已开启搜索增强，事实类问题会先联网搜索再回答")
+        else:
+            await message.edit("❌ 保存搜索配置失败")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    if action in ("off", "disable"):
+        config["search"]["enabled"] = False
+        if save_config(config):
+            await message.edit("✅ 已关闭搜索增强，后续将直接调用模型回答")
+        else:
+            await message.edit("❌ 保存搜索配置失败")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    if action == "max":
+        if len(parts) < 3 or not parts[2].isdigit():
+            await message.edit(
+                "❌ 请提供 1-8 之间的数字\n\n"
+                "示例：,ais search max 5"
+            )
+            await asyncio.sleep(3)
+            await message.delete()
+            return
+
+        max_results = int(parts[2])
+        if max_results < 1 or max_results > 8:
+            await message.edit("❌ 搜索结果条数必须在 1-8 之间")
+            await asyncio.sleep(3)
+            await message.delete()
+            return
+
+        config["search"]["max_results"] = max_results
+        if save_config(config):
+            await message.edit(f"✅ 已将搜索结果条数设置为 {max_results}")
+        else:
+            await message.edit("❌ 保存搜索配置失败")
+        await asyncio.sleep(3)
+        await message.delete()
+        return
+
+    await message.edit(
+        "❌ 未知的 search 子命令\n\n"
+        "可用命令：\n"
+        "  • ,ais search          - 查看搜索状态\n"
+        "  • ,ais search on       - 开启搜索增强\n"
+        "  • ,ais search off      - 关闭搜索增强\n"
+        "  • ,ais search max <数> - 设置搜索结果条数"
+    )
+    await asyncio.sleep(4)
+    await message.delete()
+
+
+async def decide_search_plan(
+    api_url: str,
+    api_key: str,
+    model: str,
+    question: str,
+    search_config: dict,
+) -> dict:
+    """让模型决定是否搜索以及搜索什么"""
+    if not search_config.get("enabled", True):
+        return normalize_search_plan(question, search_config, {"use_search": False})
+
+    planner_result = await call_ai_api(
+        api_url=api_url,
+        api_key=api_key,
+        model=model,
+        messages=build_search_router_messages(question),
+    )
+
+    if not is_ai_success(planner_result):
+        logs.warning("搜索路由模型调用失败，使用兜底规则")
+        return normalize_search_plan(question, search_config)
+
+    raw_plan = extract_json_object(planner_result)
+    if raw_plan is None:
+        logs.warning(f"搜索路由 JSON 解析失败: {planner_result}")
+        return normalize_search_plan(question, search_config)
+
+    return normalize_search_plan(question, search_config, raw_plan)
+
+
 async def call_ai_api(
-    api_url: str, api_key: str, model: str, prompt: str
+    api_url: str, api_key: str, model: str, messages: list[dict]
 ) -> Optional[str]:
     """调用AI API获取回复"""
     try:
@@ -78,16 +683,9 @@ async def call_ai_api(
         }
 
         # 支持OpenAI格式的API
-        # 添加system message以禁用thinking过程，只输出最终答案
         data = {
             "model": model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "请直接回答用户的问题，不要展示思考过程或推理步骤，只输出最终的简洁答案。",
-                },
-                {"role": "user", "content": prompt},
-            ],
+            "messages": messages,
         }
 
         async with aiohttp.ClientSession() as session:
@@ -147,6 +745,12 @@ async def ais_query(message: Message):
   ,ais model add <名称>    - 添加新模型
   ,ais model del <名称>    - 删除模型
 
+🌐 搜索增强：
+  ,ais search              - 查看搜索增强状态
+  ,ais search on           - 开启搜索增强
+  ,ais search off          - 关闭搜索增强
+  ,ais search max <数量>   - 设置搜索结果条数（1-8）
+
 {'🔌 MCP 管理：' if HAS_MCP else ''}
 {'  ,ais mcp list          - 列出所有MCP服务器' if HAS_MCP else ''}
 {'  ,ais mcp add-raw <名称> <JSON>  - 添加MCP服务器（推荐，直接粘贴JSON）' if HAS_MCP else ''}
@@ -161,6 +765,8 @@ async def ais_query(message: Message):
 
 💡 使用示例：
   ,ais 今天天气怎么样
+  ,ais 日本拖欠中国外包工资 是哪家公司
+  ,ais search max 5
   ,ais set https://api.openai.com/v1/chat/completions sk-xxx
   ,ais model add gpt-3.5-turbo"""
         await message.edit(help_text)
@@ -339,6 +945,11 @@ async def ais_query(message: Message):
         await handle_mcp_command(message, text.strip())
         return
 
+    # 检查是否是搜索增强配置命令
+    if text.strip().lower().startswith("search"):
+        await handle_search_command(message, text.strip())
+        return
+
     # 检查是否是配置命令
     if text.strip().lower().startswith("set"):
         # 提取配置参数
@@ -409,44 +1020,99 @@ async def ais_query(message: Message):
 
     # 调用AI API（优先尝试 MCP，如果可用）
     current_model = get_current_model(config)
+    search_config = get_search_config(config)
+    search_results = []
+    search_query = ""
+    search_plan = {
+        "use_search": False,
+        "intent": "",
+        "reason": "",
+        "search_queries": [],
+    }
 
-    # 尝试使用 MCP 增强查询（如果可用）
+    if search_config.get("enabled", True):
+        await message.edit(
+            f"🧭 正在分析问题并决定是否联网搜索...\n\n问题：{text}\n模型：{current_model}"
+        )
+        search_plan = await decide_search_plan(
+            api_url=config["api_url"],
+            api_key=config["api_key"],
+            model=current_model,
+            question=text,
+            search_config=search_config,
+        )
+
+    if search_plan["use_search"]:
+        await message.edit(
+            f"🌐 正在联网搜索...\n\n问题：{text}\n"
+            f"意图：{search_plan['intent'] or '自动识别'}\n"
+            f"模型：{current_model}"
+        )
+        search_results, search_query = await search_web_by_queries(
+            text,
+            search_plan["search_queries"],
+            search_config["max_results"],
+        )
+
+    if search_results:
+        await message.edit(
+            f"🌐 已获取 {len(search_results)} 条搜索结果，正在整理回答...\n\n"
+            f"问题：{text}\n"
+            f"意图：{search_plan['intent'] or '自动识别'}\n"
+            f"搜索词：{search_query}\n模型：{current_model}"
+        )
+        result = await call_ai_api(
+            api_url=config["api_url"],
+            api_key=config["api_key"],
+            model=current_model,
+            messages=build_search_answer_messages(
+                text,
+                search_results,
+                search_query,
+                search_plan["intent"],
+            ),
+        )
+
+        if is_ai_success(result):
+            await message.edit(
+                f"🌐 搜索增强回复（{current_model}）：\n\n{result}"
+            )
+            return
+
+        await message.edit(format_search_fallback(search_results, text))
+        return
+
+    # 搜索没有命中时，尝试 MCP 增强
     mcp_result = None
     if HAS_MCP:
         try:
             client = get_mcp_client()
             if client and client.is_ready:
                 await message.edit(
-                    f"🔌 正在通过 MCP 处理...\n\n问题: {text}"
+                    f"🔌 搜索结果不足，正在通过 MCP 补充处理...\n\n问题：{text}"
                 )
                 mcp_result = await client.smart_call(text)
         except Exception as e:
             logs.warning(f"MCP 调用失败，降级到 API: {e}")
             mcp_result = None
 
-    # 如果 MCP 不可用或调用失败，使用原有 API
     if mcp_result:
-        await message.edit(f"🔌 MCP 回复:\n\n{mcp_result}")
+        await message.edit(f"🔌 MCP 回复：\n\n{mcp_result}")
+        return
+
+    await message.edit(f"🤖 正在向AI提问...\n\n问题：{text}\n\n模型：{current_model}")
+
+    result = await call_ai_api(
+        api_url=config["api_url"],
+        api_key=config["api_key"],
+        model=current_model,
+        messages=build_direct_answer_messages(text),
+    )
+
+    if is_ai_success(result):
+        await message.edit(f"🤖 AI 回复（{current_model}）：\n\n{result}")
     else:
-        await message.edit(f"🤖 正在向AI提问...\n\n问题: {text}\n\n模型: {current_model}")
-
-        result = await call_ai_api(
-            api_url=config["api_url"],
-            api_key=config["api_key"],
-            model=current_model,
-            prompt=text,
-        )
-
-        # 显示结果
-        if (
-            result
-            and not result.startswith("API调用失败")
-            and not result.startswith("调用异常")
-            and not result == "请求超时"
-        ):
-            await message.edit(f"🤖 AI 回复（{current_model}）：\n\n{result}")
-        else:
-            await message.edit("❌ AI回复获取失败，请检查配置或网络连接")
+        await message.edit("❌ AI回复获取失败，请检查配置或网络连接")
 
 
 @listener(incoming=True, outgoing=True)
